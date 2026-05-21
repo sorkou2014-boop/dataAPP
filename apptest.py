@@ -22,7 +22,7 @@ def load_and_merge_data(uploaded_files):
     df_list = []
     for file in uploaded_files:
         # 直接讀取 Excel，不預設任何特殊格式
-        df = pd.read_excel(file)
+        df = pd.read_excel(file, engine='calamine')
         # 可選：新增一個欄位紀錄資料來源檔案
         # df['來源檔案'] = file.name 
         df_list.append(df)
