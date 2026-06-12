@@ -1,228 +1,349 @@
-import streamlit as st
-import pandas as pd
-import plotly.express as px
 import io
 import re
+import time
+from datetime import datetime
 
-# ==========================================
-# 🌟 1. 系統全域設定
-# ==========================================
-st.set_page_config(page_title="綜合維修數據分析系統", layout="wide", page_icon="📈")
-st.title("📈 綜合維修數據分析與提取平台")
-st.divider()
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
-# ==========================================
-# 🛠️ 2. 共用函式庫
-# ==========================================
-@st.cache_data
-def convert_df_to_excel(df):
-    """將 DataFrame 轉換為 Excel 供下載"""
+
+st.set_page_config(page_title="行動檢修平台通用資料整理", layout="wide")
+
+
+META_LABELS = {
+    "工單編號": ["工單編號", "工單號碼"],
+    "車號/最小成本": ["車號/最小成本單位", "車號", "最小成本單位"],
+    "工項代碼": ["工項代碼"],
+    "工項名稱": ["工項名稱"],
+    "檢查開始日期": ["檢查開始日期"],
+    "檢查結束日期": ["檢查結束日期"],
+}
+
+DETAIL_COLUMNS = [
+    "進階分類",
+    "檢查項目",
+    "SCI",
+    "檢查項目備註",
+    "儀器編號",
+    "軌道里程",
+    "設備編號",
+    "設備子編號",
+    "感應點位置",
+    "異常",
+    "檢查結果",
+    "單位",
+    "異常原因",
+    "處理對策",
+    "處理說明",
+    "備註",
+    "執行者",
+    "領班確認/SCI",
+]
+
+
+def read_excel(uploaded_file, header=None):
+    uploaded_file.seek(0)
+    try:
+        return pd.read_excel(uploaded_file, header=header, engine="calamine")
+    except Exception:
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, header=header)
+
+
+def normalize_text(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def normalize_date(value):
+    if pd.isna(value) or normalize_text(value) == "":
+        return ""
+    try:
+        return pd.to_datetime(value).strftime("%Y-%m-%d")
+    except Exception:
+        return normalize_text(value)
+
+
+def extract_numeric(value):
+    text = normalize_text(value).replace(",", "")
+    if text == "":
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group(0)) if match else None
+
+
+def find_next_value(df_raw, row_idx, col_idx):
+    for offset in range(1, 4):
+        next_col = col_idx + offset
+        if next_col < len(df_raw.columns):
+            value = df_raw.iloc[row_idx, next_col]
+            if normalize_text(value) != "":
+                return value
+    return ""
+
+
+def extract_metadata(df_raw):
+    metadata = {key: "" for key in META_LABELS}
+
+    for row_idx in range(len(df_raw)):
+        for col_idx in range(len(df_raw.columns)):
+            cell = normalize_text(df_raw.iloc[row_idx, col_idx])
+            if not cell:
+                continue
+
+            for target_key, aliases in META_LABELS.items():
+                if cell in aliases and metadata[target_key] == "":
+                    metadata[target_key] = find_next_value(df_raw, row_idx, col_idx)
+
+    metadata["工單編號"] = normalize_text(metadata["工單編號"])
+    metadata["車號/最小成本"] = normalize_text(metadata["車號/最小成本"])
+    metadata["工項代碼"] = normalize_text(metadata["工項代碼"])
+    metadata["工項名稱"] = normalize_text(metadata["工項名稱"])
+    metadata["檢查開始日期"] = normalize_date(metadata["檢查開始日期"])
+    metadata["檢查結束日期"] = normalize_date(metadata["檢查結束日期"])
+    return metadata
+
+
+def locate_header_row(df_raw):
+    required = {"進階分類", "檢查項目", "檢查結果"}
+    for row_idx in range(min(len(df_raw), 30)):
+        values = {normalize_text(v) for v in df_raw.iloc[row_idx].tolist()}
+        if required.issubset(values):
+            return row_idx
+    return 2
+
+
+def standardize_detail_columns(df_table):
+    rename_map = {}
+    for col in df_table.columns:
+        col_text = normalize_text(col)
+        for expected in DETAIL_COLUMNS:
+            if col_text == expected or expected in col_text:
+                rename_map[col] = expected
+                break
+    df_table = df_table.rename(columns=rename_map)
+
+    for col in DETAIL_COLUMNS:
+        if col not in df_table.columns:
+            df_table[col] = ""
+
+    return df_table[DETAIL_COLUMNS]
+
+
+def remove_footer_rows(df_table):
+    stop_keywords = ["工單結案人員", "檢查人員", "領班", "課長", "備註說明"]
+    keep_rows = []
+
+    for _, row in df_table.iterrows():
+        joined = " ".join(normalize_text(v) for v in row.tolist())
+        has_detail = normalize_text(row.get("進階分類")) or normalize_text(row.get("檢查項目")) or normalize_text(row.get("檢查結果"))
+
+        if any(keyword in joined for keyword in stop_keywords) and not has_detail:
+            break
+        if has_detail:
+            keep_rows.append(row)
+
+    return pd.DataFrame(keep_rows, columns=df_table.columns)
+
+
+def parse_workbook(uploaded_file):
+    df_raw = read_excel(uploaded_file, header=None)
+    metadata = extract_metadata(df_raw)
+    header_row = locate_header_row(df_raw)
+    df_table = read_excel(uploaded_file, header=header_row)
+    df_table = standardize_detail_columns(df_table)
+    df_table = remove_footer_rows(df_table)
+
+    for key, value in metadata.items():
+        df_table.insert(0, key, value)
+
+    df_table.insert(0, "來源檔案", uploaded_file.name)
+    df_table["檢查結果數值"] = df_table["檢查結果"].apply(extract_numeric)
+    return df_table
+
+
+def apply_keyword_filter(df, column, keyword):
+    keyword = normalize_text(keyword)
+    if not keyword:
+        return df
+    return df[df[column].astype(str).str.contains(keyword, case=False, na=False, regex=False)]
+
+
+def to_excel_bytes(sheets):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            safe_name = sheet_name[:31]
+            df.to_excel(writer, index=False, sheet_name=safe_name)
     return output.getvalue()
 
-def render_chart_builder(df, prefix_key=""):
-    """共用的動態圖表產生器"""
-    st.subheader("📊 動態圖表產生器")
+
+def build_stats(df):
+    numeric = pd.to_numeric(df["檢查結果數值"], errors="coerce").dropna()
+    if numeric.empty:
+        return pd.DataFrame(
+            [{"項目": "檢查結果數值", "筆數": 0, "最小值": None, "最大值": None, "平均值": None}]
+        )
+    return pd.DataFrame(
+        [
+            {
+                "項目": "檢查結果數值",
+                "筆數": int(numeric.count()),
+                "最小值": numeric.min(),
+                "最大值": numeric.max(),
+                "平均值": numeric.mean(),
+            }
+        ]
+    )
+
+
+def make_chart(df, chart_type, x_col, y_mode):
     if df.empty:
-        st.warning("目前沒有資料可供繪製圖表。")
-        return
-        
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        chart_type = st.selectbox("圖表類型", ["長條圖", "折線圖", "圓餅圖"], key=f"type_{prefix_key}")
-    with c2:
-        x_axis = st.selectbox("選擇 X 軸 (分類)", df.columns, key=f"x_{prefix_key}")
-    with c3:
-        # 篩選數值欄位供 Y 軸選擇，若無則提供計數選項
-        num_cols = df.select_dtypes(include=['number']).columns.tolist()
-        y_axis = st.selectbox("選擇 Y 軸 (數值)", ["資料筆數 (Count)"] + num_cols, key=f"y_{prefix_key}")
+        return None
 
-    if st.button("✨ 產生圖表", key=f"btn_{prefix_key}"):
-        try:
-            if y_axis == "資料筆數 (Count)":
-                plot_data = df[x_axis].value_counts().reset_index()
-                plot_data.columns = [x_axis, '筆數']
-                y_col = '筆數'
-            else:
-                plot_data = df.groupby(x_axis, as_index=False)[y_axis].sum()
-                y_col = y_axis
+    chart_df = df.copy()
+    if y_mode == "筆數":
+        chart_df = chart_df.groupby(x_col, dropna=False).size().reset_index(name="筆數")
+        y_col = "筆數"
+    else:
+        y_col = "檢查結果數值"
+        chart_df[y_col] = pd.to_numeric(chart_df[y_col], errors="coerce")
+        chart_df = chart_df.dropna(subset=[y_col])
 
-            if chart_type == "長條圖":
-                fig = px.bar(plot_data, x=x_axis, y=y_col, text_auto=True, title=f"{x_axis} 統計圖")
-            elif chart_type == "折線圖":
-                fig = px.line(plot_data, x=x_axis, y=y_col, markers=True, title=f"{x_axis} 趨勢圖")
-            else:
-                fig = px.pie(plot_data, names=x_axis, values=y_col, title=f"{x_axis} 佔比圖")
-            
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.error(f"圖表產生失敗，請確認欄位格式是否正確。錯誤：{e}")
+    if chart_df.empty:
+        return None
 
-# ==========================================
-# 🎛️ 3. 側邊欄：選擇表單類型
-# ==========================================
-st.sidebar.header("⚙️ 選擇分析模組")
-app_mode = st.sidebar.radio(
-    "請選擇您要處理的表單類型：",
-    ["1️⃣ 行動檢修平台 (需處理特規表單)", "2️⃣ EFMS工法統計 (結構化資料分析)"]
+    title = f"{x_col} / {y_col}"
+    if chart_type == "折線圖":
+        return px.line(chart_df, x=x_col, y=y_col, markers=True, title=title)
+    if chart_type == "圓餅圖":
+        return px.pie(chart_df, names=x_col, values=y_col, title=title)
+    return px.bar(chart_df, x=x_col, y=y_col, title=title)
+
+
+st.title("行動檢修平台通用資料整理")
+st.caption("多檔 Excel 匯入、進階分類/檢查項目篩選、結果清單、統計與圖表匯出")
+
+uploaded_files = st.file_uploader(
+    "選擇一份或多份 ISO 報表 Excel",
+    type=["xlsx"],
+    accept_multiple_files=True,
 )
 
-# ==========================================
-# 🚀 模組 1：行動檢修平台 (Attachment 1)
-# ==========================================
-if app_mode == "1️⃣ 行動檢修平台 (需處理特規表單)":
-    st.header("🛠️ 行動檢修平台 - 多檔整合與分析")
-    uploaded_files = st.file_uploader("📂 請上傳多個檢修平台 Excel 檔", type=["xlsx", "xls"], accept_multiple_files=True)
-    
-    if uploaded_files:
-        @st.cache_data
-        def process_iso_forms(files):
-            all_records = []
-            for file in files:
-                # 這裡沿用你之前的邏輯：上層抓 Metadata，下層抓表格
-                try:
-                    df_raw = pd.read_excel(file, header=None)
-                    meta_data = {"工單號碼": "", "車號/最小成本": "", "檢查結束日期": ""}
-                    
-                    # 抓取表頭資訊
-                    for r in range(min(15, len(df_raw))):
-                        for c in range(len(df_raw.columns)):
-                            cell_val = str(df_raw.iloc[r, c]).strip()
-                            if "工單編號" in cell_val: meta_data["工單號碼"] = df_raw.iloc[r, c+1]
-                            elif "車號/最小成本" in cell_val: meta_data["車號/最小成本"] = df_raw.iloc[r, c+1]
-                            elif "檢查結束日期" in cell_val: meta_data["檢查結束日期"] = df_raw.iloc[r, c+1]
-                    
-                    # 抓取表格區段 (假設從含有'進階分類'的那行開始)
-                    df_table = pd.read_excel(file, header=2) # 依據實際狀況調整 header 行數
-                    if '進階分類' in df_table.columns and '檢查項目' in df_table.columns:
-                        for _, row in df_table.iterrows():
-                            # 尋找檢查結果相關的欄位
-                            result_col = [col for col in df_table.columns if '檢查結果' in str(col)]
-                            res_val = row[result_col[0]] if result_col else ""
-                            
-                            record = meta_data.copy()
-                            record.update({
-                                "進階分類": row.get('進階分類', ''),
-                                "檢查項目": row.get('檢查項目', ''),
-                                "檢查結果": res_val
-                            })
-                            all_records.append(record)
-                except Exception as e:
-                    st.warning(f"檔案 {file.name} 處理略過。原因: {e}")
-            return pd.DataFrame(all_records)
-            
-        with st.spinner("高速萃取與整併中..."):
-            df_action = process_iso_forms(uploaded_files)
-            
-        if not df_action.empty:
-            st.success(f"✅ 成功整合 {len(df_action)} 筆檢修紀錄！")
-            
-            # --- 篩選區 ---
-            st.subheader("🔍 進階整合與篩選")
-            col1, col2 = st.columns(2)
-            with col1:
-                adv_classes = df_action['進階分類'].dropna().unique().tolist()
-                sel_class = st.multiselect("過濾 A.[進階分類]", adv_classes)
-            with col2:
-                items = df_action['檢查項目'].dropna().unique().tolist()
-                sel_item = st.multiselect("過濾 B.[檢查項目]", items)
-                
-            filtered_act = df_action.copy()
-            if sel_class: filtered_act = filtered_act[filtered_act['進階分類'].isin(sel_class)]
-            if sel_item: filtered_act = filtered_act[filtered_act['檢查項目'].isin(sel_item)]
-            
-            # --- 預覽與匯出 ---
-            st.markdown(f"**📋 C.[檢查結果] 整合清單預覽 (共 {len(filtered_act)} 筆)**")
-            st.dataframe(filtered_act, use_container_width=True)
-            st.download_button("📥 匯出整合清單 (Excel)", convert_df_to_excel(filtered_act), "行動檢修整合清單.xlsx")
-            
-            # --- 附屬計算功能 ---
-            st.subheader("🧮 附屬計算功能 (數值結果)")
-            # 嘗試將結果轉為數值以進行計算
-            filtered_act['數值結果'] = pd.to_numeric(filtered_act['檢查結果'], errors='coerce')
-            calc_df = filtered_act.dropna(subset=['數值結果'])
-            
-            if not calc_df.empty:
-                stats = calc_df.groupby(['進階分類', '檢查項目'])['數值結果'].agg(['min', 'max', 'mean']).reset_index()
-                stats.rename(columns={'min': '最小值', 'max': '最大值', 'mean': '平均值'}, inplace=True)
-                st.dataframe(stats, use_container_width=True)
-                st.download_button("📥 匯出計算結果 (Excel)", convert_df_to_excel(stats), "數值計算結果.xlsx")
-            else:
-                st.info("目前篩選的資料中沒有可計算的數值。")
-                
-            st.divider()
-            render_chart_builder(filtered_act, prefix_key="act")
+if "all_data" not in st.session_state:
+    st.session_state.all_data = pd.DataFrame()
 
-# ==========================================
-# 🚀 模組 2：EFMS 工法統計 (Attachment 2)
-# ==========================================
-elif app_mode == "2️⃣ EFMS工法統計 (結構化資料分析)":
-    st.header("📊 EFMS 工法統計分析")
-    uploaded_efms = st.file_uploader("📂 請上傳 EFMS 統計 Excel 檔", type=["xlsx", "xls"], accept_multiple_files=True)
-    
-    if uploaded_efms:
-        @st.cache_data
-        def process_efms(files):
-            df_list = [pd.read_excel(f) for f in files]
-            df = pd.concat(df_list, ignore_index=True)
-            
-            # 🌟 核心需求：將分類 1, 2, 3... 分列表示 (Unpivot 展開)
-            # 尋找基礎欄位
-            base_cols = ['子統別名稱', '站別', '報修單號', '人工時', '報修日期', '報修等級', '報修單狀態', '報修症狀', '報修症狀描述']
-            exist_base = [c for c in base_cols if c in df.columns]
-            
-            # 動態找出有幾組故障分類 (例如1, 2, 3...)
-            melted_rows = []
-            for i in range(1, 6): # 假設最多到分類5
-                grp_cols = [f'故障分類{i}', f'故障原因{i}', f'故障情形{i}', f'處理動作{i}']
-                if all(c in df.columns for c in grp_cols):
-                    # 擷取基礎欄位 + 該組故障欄位
-                    temp_df = df[exist_base + grp_cols].copy()
-                    # 重新命名去除數字，以便整合
-                    temp_df.rename(columns={
-                        f'故障分類{i}': '故障分類', 
-                        f'故障原因{i}': '故障原因', 
-                        f'故障情形{i}': '故障情形', 
-                        f'處理動作{i}': '處理動作'
-                    }, inplace=True)
-                    # 剃除空白的分類列
-                    temp_df = temp_df.dropna(subset=['故障分類'])
-                    melted_rows.append(temp_df)
-                    
-            if melted_rows:
-                final_efms = pd.concat(melted_rows, ignore_index=True)
-            else:
-                final_efms = df # 若無後綴數字，保持原樣
-            return final_efms
-            
-        with st.spinner("資料展開與分析中..."):
-            df_efms = process_efms(uploaded_efms)
-            
-        st.success("✅ EFMS 資料讀取完畢 (包含故障分列處理)！")
-        
-        # --- 主要架構篩選 ---
-        st.subheader("🔍 主要架構與進階歸類")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: f_sub = st.multiselect("過濾 [子統別名稱]", df_efms.get('子統別名稱', pd.Series()).dropna().unique())
-        with c2: f_sta = st.multiselect("過濾 [站別]", df_efms.get('站別', pd.Series()).dropna().unique())
-        with c3: f_cat = st.multiselect("歸類 A.[故障分類]", df_efms.get('故障分類', pd.Series()).dropna().unique())
-        with c4: f_rea = st.multiselect("歸類 B.[故障原因]", df_efms.get('故障原因', pd.Series()).dropna().unique())
-        
-        filtered_efms = df_efms.copy()
-        if f_sub: filtered_efms = filtered_efms[filtered_efms['子統別名稱'].isin(f_sub)]
-        if f_sta: filtered_efms = filtered_efms[filtered_efms['站別'].isin(f_sta)]
-        if f_cat: filtered_efms = filtered_efms[filtered_efms['故障分類'].isin(f_cat)]
-        if f_rea: filtered_efms = filtered_efms[filtered_efms['故障原因'].isin(f_rea)]
-        
-        st.markdown(f"**📋 報修清單預覽 (共 {len(filtered_efms)} 筆)**")
-        
-        # 定義顯示欄位順序
-        display_cols = ['報修單號', '故障分類', '故障原因', '故障情形', '處理動作', '報修症狀', '報修症狀描述', '人工時']
-        exist_display = [c for c in display_cols if c in filtered_efms.columns]
-        st.dataframe(filtered_efms[exist_display], use_container_width=True)
-        st.download_button("📥 匯出 EFMS 清單 (Excel)", convert_df_to_excel(filtered_efms[exist_display]), "EFMS處理清單.xlsx")
-        
-        st.divider()
-        render_chart_builder(filtered_efms, prefix_key="efms")
+if uploaded_files and st.button("開始整理", use_container_width=True):
+    start_time = time.time()
+    frames = []
+    progress = st.progress(0)
+
+    with st.spinner("正在讀取與標準化資料..."):
+        for idx, uploaded_file in enumerate(uploaded_files):
+            if uploaded_file.name.startswith("~$"):
+                continue
+            try:
+                frames.append(parse_workbook(uploaded_file))
+            except Exception as exc:
+                st.warning(f"{uploaded_file.name} 讀取失敗：{exc}")
+            progress.progress((idx + 1) / len(uploaded_files))
+
+    st.session_state.all_data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    st.session_state.process_msg = f"已整理 {len(frames)} 份檔案，共 {len(st.session_state.all_data)} 筆明細，耗時 {time.time() - start_time:.1f} 秒"
+    st.rerun()
+
+
+all_data = st.session_state.all_data
+if all_data.empty:
+    st.info("請先上傳 Excel 並按下開始整理。")
+    st.stop()
+
+st.success(st.session_state.get("process_msg", "資料已整理完成。"))
+
+with st.sidebar:
+    st.header("篩選")
+
+    category_options = sorted(v for v in all_data["進階分類"].dropna().astype(str).unique() if v.strip())
+    selected_categories = st.multiselect("進階分類", category_options)
+    category_keyword = st.text_input("進階分類關鍵字")
+
+    item_options_source = all_data
+    if selected_categories:
+        item_options_source = item_options_source[item_options_source["進階分類"].isin(selected_categories)]
+    item_options = sorted(v for v in item_options_source["檢查項目"].dropna().astype(str).unique() if v.strip())
+    selected_items = st.multiselect("檢查項目", item_options)
+    item_keyword = st.text_input("檢查項目關鍵字")
+
+    result_keyword = st.text_input("檢查結果關鍵字")
+
+filtered = all_data.copy()
+if selected_categories:
+    filtered = filtered[filtered["進階分類"].isin(selected_categories)]
+if selected_items:
+    filtered = filtered[filtered["檢查項目"].isin(selected_items)]
+
+filtered = apply_keyword_filter(filtered, "進階分類", category_keyword)
+filtered = apply_keyword_filter(filtered, "檢查項目", item_keyword)
+filtered = apply_keyword_filter(filtered, "檢查結果", result_keyword)
+
+summary_cols = st.columns(4)
+summary_cols[0].metric("明細筆數", f"{len(filtered):,}")
+summary_cols[1].metric("工單數", f"{filtered['工單編號'].nunique():,}")
+summary_cols[2].metric("車號/最小成本", f"{filtered['車號/最小成本'].nunique():,}")
+summary_cols[3].metric("可計算數值", f"{filtered['檢查結果數值'].notna().sum():,}")
+
+tab_list, tab_stats, tab_chart = st.tabs(["結果清單", "統計", "圖表"])
+
+with tab_list:
+    display_cols = [
+        "來源檔案",
+        "工單編號",
+        "車號/最小成本",
+        "檢查結束日期",
+        "進階分類",
+        "檢查項目",
+        "檢查結果",
+        "單位",
+        "異常",
+        "異常原因",
+        "處理對策",
+        "執行者",
+    ]
+    st.dataframe(filtered[display_cols], use_container_width=True, hide_index=True)
+
+with tab_stats:
+    stats_df = build_stats(filtered)
+    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+with tab_chart:
+    chart_cols = [
+        "工單編號",
+        "車號/最小成本",
+        "檢查結束日期",
+        "進階分類",
+        "檢查項目",
+        "檢查結果",
+        "單位",
+    ]
+    left, middle, right = st.columns(3)
+    chart_type = left.selectbox("圖表類型", ["長條圖", "折線圖", "圓餅圖"])
+    x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=3)
+    y_mode = right.selectbox("Y 軸 / 數值", ["筆數", "檢查結果數值"])
+
+    fig = make_chart(filtered, chart_type, x_col, y_mode)
+    if fig is None:
+        st.info("目前篩選結果沒有可繪圖的資料。")
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+
+export_name = f"行動檢修平台整理_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+export_bytes = to_excel_bytes({"篩選結果": filtered, "統計": build_stats(filtered)})
+st.download_button(
+    "匯出目前篩選結果",
+    data=export_bytes,
+    file_name=export_name,
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
