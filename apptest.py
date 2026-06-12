@@ -1,4 +1,5 @@
 import io
+import json
 import re
 import time
 import zipfile
@@ -167,6 +168,17 @@ def extract_numeric(value):
     return float(match.group(0)) if match else None
 
 
+def split_category(value):
+    text = normalize_text(value)
+    if not text:
+        return "", ""
+
+    parts = [part.strip() for part in re.split(r"\s*/\s*|\n+", text) if part.strip()]
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " / ".join(parts[1:])
+
+
 def find_next_value(df_raw, row_idx, col_idx):
     for offset in range(1, 4):
         next_col = col_idx + offset
@@ -261,6 +273,8 @@ def parse_workbook(uploaded_file):
 
     df_table.insert(0, "來源檔案", uploaded_file.name)
     df_table["檢查結果數值"] = df_table["檢查結果"].apply(extract_numeric)
+    df_table[["進階分類1", "進階分類2"]] = df_table["進階分類"].apply(lambda value: pd.Series(split_category(value)))
+    df_table = df_table[df_table["檢查結果數值"].notna()].reset_index(drop=True)
     return df_table
 
 
@@ -269,6 +283,14 @@ def apply_keyword_filter(df, column, keyword):
     if not keyword:
         return df
     return df[df[column].astype(str).str.contains(keyword, case=False, na=False, regex=False)]
+
+
+def compact_repeated_values(df, columns):
+    compact_df = df.copy()
+    for col in columns:
+        if col in compact_df.columns:
+            compact_df[col] = compact_df[col].mask(compact_df[col].eq(compact_df[col].shift()), "")
+    return compact_df
 
 
 def to_excel_bytes(sheets):
@@ -280,33 +302,75 @@ def to_excel_bytes(sheets):
     return output.getvalue()
 
 
-def build_stats(df):
+def build_stats(df, group_cols=None, lower_limit=None, upper_limit=None):
     numeric = pd.to_numeric(df["檢查結果數值"], errors="coerce").dropna()
     if numeric.empty:
         return pd.DataFrame(
-            [{"項目": "檢查結果數值", "筆數": 0, "最小值": None, "最大值": None, "平均值": None}]
+            [{"項目": "檢查結果數值", "筆數": 0, "最小值": None, "最大值": None, "平均值": None, "低於下限": 0, "高於上限": 0}]
         )
-    return pd.DataFrame(
-        [
-            {
-                "項目": "檢查結果數值",
-                "筆數": int(numeric.count()),
-                "最小值": numeric.min(),
-                "最大值": numeric.max(),
-                "平均值": numeric.mean(),
-            }
-        ]
-    )
+
+    stats_source = df.copy()
+    stats_source["檢查結果數值"] = pd.to_numeric(stats_source["檢查結果數值"], errors="coerce")
+    stats_source = stats_source.dropna(subset=["檢查結果數值"])
+    group_cols = group_cols or []
+
+    if group_cols:
+        stats_df = (
+            stats_source.groupby(group_cols, dropna=False)["檢查結果數值"]
+            .agg(筆數="count", 最小值="min", 最大值="max", 平均值="mean")
+            .reset_index()
+        )
+    else:
+        stats_df = pd.DataFrame(
+            [
+                {
+                    "項目": "檢查結果數值",
+                    "筆數": int(numeric.count()),
+                    "最小值": numeric.min(),
+                    "最大值": numeric.max(),
+                    "平均值": numeric.mean(),
+                }
+            ]
+        )
+
+    if lower_limit is not None or upper_limit is not None:
+        def below_count(group):
+            if lower_limit is None:
+                return 0
+            return int((group["檢查結果數值"] < lower_limit).sum())
+
+        def above_count(group):
+            if upper_limit is None:
+                return 0
+            return int((group["檢查結果數值"] > upper_limit).sum())
+
+        if group_cols:
+            limit_df = (
+                stats_source.groupby(group_cols, dropna=False)
+                .apply(lambda group: pd.Series({"低於下限": below_count(group), "高於上限": above_count(group)}), include_groups=False)
+                .reset_index()
+            )
+            stats_df = stats_df.merge(limit_df, on=group_cols, how="left")
+        else:
+            stats_df["低於下限"] = below_count(stats_source)
+            stats_df["高於上限"] = above_count(stats_source)
+    else:
+        stats_df["低於下限"] = 0
+        stats_df["高於上限"] = 0
+
+    return stats_df
 
 
-def make_chart(df, chart_type, x_col, y_mode):
+def make_chart(df, chart_type, x_col, y_mode, bar_color=None, lower_limit=None, upper_limit=None):
     if df.empty:
         return None
 
     chart_df = df.copy()
-    if y_mode == "筆數":
-        chart_df = chart_df.groupby(x_col, dropna=False).size().reset_index(name="筆數")
-        y_col = "筆數"
+    if y_mode == "統計結果數值":
+        chart_df["檢查結果數值"] = pd.to_numeric(chart_df["檢查結果數值"], errors="coerce")
+        chart_df = chart_df.dropna(subset=["檢查結果數值"])
+        chart_df = chart_df.groupby(x_col, dropna=False)["檢查結果數值"].mean().reset_index(name="統計結果數值")
+        y_col = "統計結果數值"
     else:
         y_col = "檢查結果數值"
         chart_df[y_col] = pd.to_numeric(chart_df[y_col], errors="coerce")
@@ -317,10 +381,45 @@ def make_chart(df, chart_type, x_col, y_mode):
 
     title = f"{x_col} / {y_col}"
     if chart_type == "折線圖":
-        return px.line(chart_df, x=x_col, y=y_col, markers=True, title=title)
-    if chart_type == "圓餅圖":
-        return px.pie(chart_df, names=x_col, values=y_col, title=title)
-    return px.bar(chart_df, x=x_col, y=y_col, title=title)
+        fig = px.line(chart_df, x=x_col, y=y_col, markers=True, title=title)
+    elif chart_type == "圓餅圖":
+        fig = px.pie(chart_df, names=x_col, values=y_col, title=title)
+    else:
+        fig = px.bar(chart_df, x=x_col, y=y_col, title=title)
+        if bar_color:
+            fig.update_traces(marker_color=bar_color)
+
+    if chart_type != "圓餅圖":
+        if lower_limit is not None:
+            fig.add_hline(y=lower_limit, line_dash="dash", line_color="red", annotation_text="下限")
+        if upper_limit is not None:
+            fig.add_hline(y=upper_limit, line_dash="dash", line_color="green", annotation_text="上限")
+    return fig
+
+
+def setting_value(key, default):
+    return st.session_state.get("saved_settings", {}).get(key, default)
+
+
+def valid_default_list(key, options):
+    saved = setting_value(key, [])
+    if not isinstance(saved, list):
+        return []
+    option_set = set(options)
+    return [value for value in saved if value in option_set]
+
+
+def valid_index(key, options, default=0):
+    saved = setting_value(key, default)
+    if not isinstance(saved, int) or saved < 0 or saved >= len(options):
+        return default
+    return saved
+
+
+def update_saved_settings(**kwargs):
+    settings = st.session_state.get("saved_settings", {}).copy()
+    settings.update(kwargs)
+    st.session_state.saved_settings = settings
 
 
 st.title("行動檢修平台通用資料整理")
@@ -334,6 +433,8 @@ uploaded_files = st.file_uploader(
 
 if "all_data" not in st.session_state:
     st.session_state.all_data = pd.DataFrame()
+if "saved_settings" not in st.session_state:
+    st.session_state.saved_settings = {}
 
 if uploaded_files and st.button("開始整理", use_container_width=True):
     start_time = time.time()
@@ -365,26 +466,66 @@ st.success(st.session_state.get("process_msg", "資料已整理完成。"))
 with st.sidebar:
     st.header("篩選")
 
-    category_options = sorted(v for v in all_data["進階分類"].dropna().astype(str).unique() if v.strip())
-    selected_categories = st.multiselect("進階分類", category_options)
-    category_keyword = st.text_input("進階分類關鍵字")
+    settings_file = st.file_uploader("匯入設定檔", type=["json"], accept_multiple_files=False)
+    if settings_file is not None and st.button("套用設定檔", use_container_width=True):
+        try:
+            st.session_state.saved_settings = json.loads(settings_file.getvalue().decode("utf-8"))
+            st.rerun()
+        except Exception as exc:
+            st.warning(f"設定檔讀取失敗：{exc}")
+
+    category1_options = sorted(v for v in all_data["進階分類1"].dropna().astype(str).unique() if v.strip())
+    selected_category1 = st.multiselect("進階分類1", category1_options, default=valid_default_list("selected_category1", category1_options))
+    category1_keyword = st.text_input("進階分類1關鍵字", value=setting_value("category1_keyword", ""))
+
+    category2_source = all_data
+    if selected_category1:
+        category2_source = category2_source[category2_source["進階分類1"].isin(selected_category1)]
+    category2_options = sorted(v for v in category2_source["進階分類2"].dropna().astype(str).unique() if v.strip())
+    selected_category2 = st.multiselect("進階分類2", category2_options, default=valid_default_list("selected_category2", category2_options))
+    category2_keyword = st.text_input("進階分類2關鍵字", value=setting_value("category2_keyword", ""))
 
     item_options_source = all_data
-    if selected_categories:
-        item_options_source = item_options_source[item_options_source["進階分類"].isin(selected_categories)]
+    if selected_category1:
+        item_options_source = item_options_source[item_options_source["進階分類1"].isin(selected_category1)]
+    if selected_category2:
+        item_options_source = item_options_source[item_options_source["進階分類2"].isin(selected_category2)]
     item_options = sorted(v for v in item_options_source["檢查項目"].dropna().astype(str).unique() if v.strip())
-    selected_items = st.multiselect("檢查項目", item_options)
-    item_keyword = st.text_input("檢查項目關鍵字")
+    selected_items = st.multiselect("檢查項目", item_options, default=valid_default_list("selected_items", item_options))
+    item_keyword = st.text_input("檢查項目關鍵字", value=setting_value("item_keyword", ""))
 
-    result_keyword = st.text_input("檢查結果關鍵字")
+    result_keyword = st.text_input("檢查結果關鍵字", value=setting_value("result_keyword", ""))
+
+    if st.button("保留目前設定", use_container_width=True):
+        update_saved_settings(
+            selected_category1=selected_category1,
+            category1_keyword=category1_keyword,
+            selected_category2=selected_category2,
+            category2_keyword=category2_keyword,
+            selected_items=selected_items,
+            item_keyword=item_keyword,
+            result_keyword=result_keyword,
+        )
+        st.success("已保留目前篩選設定。")
+
+    st.download_button(
+        "下載設定檔",
+        data=json.dumps(st.session_state.saved_settings, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="行動檢修平台設定.json",
+        mime="application/json",
+        use_container_width=True,
+    )
 
 filtered = all_data.copy()
-if selected_categories:
-    filtered = filtered[filtered["進階分類"].isin(selected_categories)]
+if selected_category1:
+    filtered = filtered[filtered["進階分類1"].isin(selected_category1)]
+if selected_category2:
+    filtered = filtered[filtered["進階分類2"].isin(selected_category2)]
 if selected_items:
     filtered = filtered[filtered["檢查項目"].isin(selected_items)]
 
-filtered = apply_keyword_filter(filtered, "進階分類", category_keyword)
+filtered = apply_keyword_filter(filtered, "進階分類1", category1_keyword)
+filtered = apply_keyword_filter(filtered, "進階分類2", category2_keyword)
 filtered = apply_keyword_filter(filtered, "檢查項目", item_keyword)
 filtered = apply_keyword_filter(filtered, "檢查結果", result_keyword)
 
@@ -402,44 +543,105 @@ with tab_list:
         "工單編號",
         "車號/最小成本",
         "檢查結束日期",
-        "進階分類",
+        "進階分類1",
+        "進階分類2",
         "檢查項目",
-        "檢查結果",
+        "檢查結果數值",
         "單位",
-        "異常",
-        "異常原因",
-        "處理對策",
         "執行者",
     ]
-    st.dataframe(filtered[display_cols], use_container_width=True, hide_index=True)
+    display_df = compact_repeated_values(
+        filtered[display_cols],
+        ["來源檔案", "工單編號", "車號/最小成本", "檢查結束日期"],
+    ).rename(columns={"檢查結果數值": "檢查結果"})
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 with tab_stats:
-    stats_df = build_stats(filtered)
+    vehicle_options = sorted(v for v in filtered["車號/最小成本"].dropna().astype(str).unique() if v.strip())
+    stat_vehicle = st.multiselect("選擇要計算的車號/最小成本", vehicle_options, default=valid_default_list("stat_vehicle", vehicle_options))
+
+    stat_item_options = sorted(v for v in filtered["檢查項目"].dropna().astype(str).unique() if v.strip())
+    stat_items = st.multiselect("選擇要計算的檢查項目", stat_item_options, default=valid_default_list("stat_items", stat_item_options))
+
+    limit_cols = st.columns(2)
+    lower_limit_enabled = limit_cols[0].checkbox("啟用統計下限", value=setting_value("lower_limit_enabled", False))
+    lower_limit = limit_cols[0].number_input("統計下限", value=float(setting_value("lower_limit", 0.0)), disabled=not lower_limit_enabled)
+    upper_limit_enabled = limit_cols[1].checkbox("啟用統計上限", value=setting_value("upper_limit_enabled", False))
+    upper_limit = limit_cols[1].number_input("統計上限", value=float(setting_value("upper_limit", 0.0)), disabled=not upper_limit_enabled)
+
+    stats_source = filtered.copy()
+    if stat_vehicle:
+        stats_source = stats_source[stats_source["車號/最小成本"].isin(stat_vehicle)]
+    if stat_items:
+        stats_source = stats_source[stats_source["檢查項目"].isin(stat_items)]
+
+    lower_value = lower_limit if lower_limit_enabled else None
+    upper_value = upper_limit if upper_limit_enabled else None
+    stats_df = build_stats(stats_source, ["車號/最小成本", "檢查項目"], lower_value, upper_value)
     st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
-with tab_chart:
-    chart_cols = [
-        "工單編號",
-        "車號/最小成本",
-        "檢查結束日期",
-        "進階分類",
-        "檢查項目",
-        "檢查結果",
-        "單位",
-    ]
-    left, middle, right = st.columns(3)
-    chart_type = left.selectbox("圖表類型", ["長條圖", "折線圖", "圓餅圖"])
-    x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=3)
-    y_mode = right.selectbox("Y 軸 / 數值", ["筆數", "檢查結果數值"])
+    if st.button("保留統計設定", use_container_width=True):
+        update_saved_settings(
+            stat_vehicle=stat_vehicle,
+            stat_items=stat_items,
+            lower_limit_enabled=lower_limit_enabled,
+            lower_limit=lower_limit,
+            upper_limit_enabled=upper_limit_enabled,
+            upper_limit=upper_limit,
+        )
+        st.success("已保留統計設定。")
 
-    fig = make_chart(filtered, chart_type, x_col, y_mode)
+with tab_chart:
+    chart_cols = ["車號/最小成本", "檢查結束日期"]
+    left, middle, right = st.columns(3)
+    chart_types = ["長條圖", "折線圖", "圓餅圖"]
+    y_modes = ["檢查結果數值", "統計結果數值"]
+    chart_type = left.selectbox("圖表類型", chart_types, index=valid_index("chart_type_index", chart_types))
+    x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
+    y_mode = right.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
+    bar_color = st.color_picker("長條圖柱體顏色", value=setting_value("bar_color", "#2563EB"))
+
+    fig = make_chart(filtered, chart_type, x_col, y_mode, bar_color, lower_value, upper_value)
     if fig is None:
         st.info("目前篩選結果沒有可繪圖的資料。")
     else:
         st.plotly_chart(fig, use_container_width=True)
+        export_cols = st.columns(2)
+        chart_html = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
+        export_cols[0].download_button(
+            "匯出圖表 HTML",
+            data=chart_html,
+            file_name=f"圖表_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+        try:
+            chart_png = fig.to_image(format="png", scale=2)
+            export_cols[1].download_button(
+                "匯出圖表圖片",
+                data=chart_png,
+                file_name=f"圖表_{datetime.now().strftime('%Y%m%d_%H%M')}.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+        except Exception:
+            export_cols[1].info("若要匯出 PNG，請確認已安裝 kaleido。")
+
+    if st.button("保留圖表設定", use_container_width=True):
+        update_saved_settings(
+            chart_type_index=chart_types.index(chart_type),
+            x_col_index=chart_cols.index(x_col),
+            y_mode_index=y_modes.index(y_mode),
+            bar_color=bar_color,
+        )
+        st.success("已保留圖表設定。")
 
 export_name = f"行動檢修平台整理_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-export_bytes = to_excel_bytes({"篩選結果": filtered, "統計": build_stats(filtered)})
+export_display = compact_repeated_values(
+    filtered[display_cols],
+    ["來源檔案", "工單編號", "車號/最小成本", "檢查結束日期"],
+).rename(columns={"檢查結果數值": "檢查結果"})
+export_bytes = to_excel_bytes({"篩選結果": export_display, "統計": stats_df})
 st.download_button(
     "匯出目前篩選結果",
     data=export_bytes,
