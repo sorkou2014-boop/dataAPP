@@ -1,7 +1,9 @@
 import io
 import re
 import time
+import zipfile
 from datetime import datetime
+from xml.etree import ElementTree as ET
 
 import pandas as pd
 import plotly.express as px
@@ -48,7 +50,98 @@ def read_excel(uploaded_file, header=None):
         return pd.read_excel(uploaded_file, header=header, engine="calamine")
     except Exception:
         uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, header=header)
+        try:
+            return pd.read_excel(uploaded_file, header=header)
+        except Exception:
+            uploaded_file.seek(0)
+            return read_xlsx_xml(uploaded_file, header=header)
+
+
+def column_index(cell_ref):
+    match = re.match(r"([A-Z]+)", cell_ref or "")
+    if not match:
+        return 0
+
+    number = 0
+    for char in match.group(1):
+        number = number * 26 + ord(char) - ord("A") + 1
+    return number - 1
+
+
+def row_index(cell_ref):
+    match = re.search(r"(\d+)", cell_ref or "")
+    return int(match.group(1)) - 1 if match else 0
+
+
+def read_shared_strings(zip_file, ns):
+    if "xl/sharedStrings.xml" not in zip_file.namelist():
+        return []
+
+    root = ET.fromstring(zip_file.read("xl/sharedStrings.xml"))
+    shared = []
+    for item in root.findall("a:si", ns):
+        texts = [node.text or "" for node in item.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")]
+        shared.append("".join(texts))
+    return shared
+
+
+def first_sheet_path(zip_file, ns):
+    workbook = ET.fromstring(zip_file.read("xl/workbook.xml"))
+    rels = ET.fromstring(zip_file.read("xl/_rels/workbook.xml.rels"))
+    rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
+    first_sheet = workbook.find("a:sheets/a:sheet", ns)
+    rel_id = first_sheet.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]
+    target = rel_map[rel_id].lstrip("/")
+    return target if target.startswith("xl/") else f"xl/{target}"
+
+
+def cell_value(cell, shared, ns):
+    cell_type = cell.attrib.get("t")
+
+    if cell_type == "s":
+        value = cell.find("a:v", ns)
+        return shared[int(value.text)] if value is not None and value.text else ""
+
+    if cell_type == "inlineStr":
+        texts = [node.text or "" for node in cell.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")]
+        return "".join(texts)
+
+    value = cell.find("a:v", ns)
+    return value.text if value is not None and value.text is not None else ""
+
+
+def read_xlsx_xml(uploaded_file, header=None):
+    ns = {
+        "a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    }
+    data = uploaded_file.read()
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zip_file:
+        shared = read_shared_strings(zip_file, ns)
+        sheet_path = first_sheet_path(zip_file, ns)
+        root = ET.fromstring(zip_file.read(sheet_path))
+
+        cells = {}
+        max_row = 0
+        max_col = 0
+        for cell in root.findall(".//a:c", ns):
+            ref = cell.attrib.get("r", "")
+            r_idx = row_index(ref)
+            c_idx = column_index(ref)
+            cells[(r_idx, c_idx)] = cell_value(cell, shared, ns)
+            max_row = max(max_row, r_idx)
+            max_col = max(max_col, c_idx)
+
+    rows = []
+    for r_idx in range(max_row + 1):
+        rows.append([cells.get((r_idx, c_idx), "") for c_idx in range(max_col + 1)])
+
+    if header is None:
+        return pd.DataFrame(rows)
+
+    headers = [normalize_text(value) or f"欄位{idx + 1}" for idx, value in enumerate(rows[header])]
+    return pd.DataFrame(rows[header + 1 :], columns=headers)
 
 
 def normalize_text(value):
@@ -119,11 +212,18 @@ def standardize_detail_columns(df_table):
     rename_map = {}
     for col in df_table.columns:
         col_text = normalize_text(col)
+
+        if col_text in DETAIL_COLUMNS:
+            rename_map[col] = col_text
+            continue
+
         for expected in DETAIL_COLUMNS:
-            if col_text == expected or expected in col_text:
+            if col_text.startswith(expected) and col_text != "檢查項目備註":
                 rename_map[col] = expected
                 break
     df_table = df_table.rename(columns=rename_map)
+
+    df_table = df_table.loc[:, ~df_table.columns.duplicated()]
 
     for col in DETAIL_COLUMNS:
         if col not in df_table.columns:
