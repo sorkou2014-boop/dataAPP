@@ -302,11 +302,22 @@ def to_excel_bytes(sheets):
     return output.getvalue()
 
 
-def build_stats(df, group_cols=None, lower_limit=None, upper_limit=None):
+def build_stats(df, group_cols=None, compare_metric="最小值", lower_limit=None, upper_limit=None):
     numeric = pd.to_numeric(df["檢查結果數值"], errors="coerce").dropna()
     if numeric.empty:
         return pd.DataFrame(
-            [{"項目": "檢查結果數值", "筆數": 0, "最小值": None, "最大值": None, "平均值": None, "低於下限": 0, "高於上限": 0}]
+            [
+                {
+                    "項目": "檢查結果數值",
+                    "筆數": 0,
+                    "最小值": None,
+                    "最大值": None,
+                    "平均值": None,
+                    "統計方式": compare_metric,
+                    "統計結果數值": None,
+                    "判定": "",
+                }
+            ]
         )
 
     stats_source = df.copy()
@@ -333,52 +344,34 @@ def build_stats(df, group_cols=None, lower_limit=None, upper_limit=None):
             ]
         )
 
-    if lower_limit is not None or upper_limit is not None:
-        def below_count(group):
-            if lower_limit is None:
-                return 0
-            return int((group["檢查結果數值"] < lower_limit).sum())
+    if compare_metric not in ["最小值", "最大值", "平均值"]:
+        compare_metric = "最小值"
 
-        def above_count(group):
-            if upper_limit is None:
-                return 0
-            return int((group["檢查結果數值"] > upper_limit).sum())
-
-        if group_cols:
-            limit_df = (
-                stats_source.groupby(group_cols, dropna=False)
-                .apply(lambda group: pd.Series({"低於下限": below_count(group), "高於上限": above_count(group)}), include_groups=False)
-                .reset_index()
-            )
-            stats_df = stats_df.merge(limit_df, on=group_cols, how="left")
-        else:
-            stats_df["低於下限"] = below_count(stats_source)
-            stats_df["高於上限"] = above_count(stats_source)
-    else:
-        stats_df["低於下限"] = 0
-        stats_df["高於上限"] = 0
-
+    stats_df["統計方式"] = compare_metric
+    stats_df["統計結果數值"] = stats_df[compare_metric]
+    stats_df["判定"] = ""
+    if lower_limit is not None:
+        stats_df.loc[stats_df["統計結果數值"] < lower_limit, "判定"] = "低於下限"
+    if upper_limit is not None:
+        stats_df.loc[stats_df["統計結果數值"] > upper_limit, "判定"] = "高於上限"
     return stats_df
 
 
-def make_chart(df, chart_type, x_col, y_mode, bar_color=None, lower_limit=None, upper_limit=None):
+def make_chart(df, chart_type, x_col, y_col, bar_color=None, lower_limit=None, upper_limit=None, y_min=None, y_max=None):
     if df.empty:
         return None
 
     chart_df = df.copy()
-    if y_mode == "統計結果數值":
-        chart_df["檢查結果數值"] = pd.to_numeric(chart_df["檢查結果數值"], errors="coerce")
-        chart_df = chart_df.dropna(subset=["檢查結果數值"])
-        chart_df = chart_df.groupby(x_col, dropna=False)["檢查結果數值"].mean().reset_index(name="統計結果數值")
-        y_col = "統計結果數值"
-    else:
-        y_col = "檢查結果數值"
-        chart_df[y_col] = pd.to_numeric(chart_df[y_col], errors="coerce")
-        chart_df = chart_df.dropna(subset=[y_col])
+    if x_col not in chart_df.columns or y_col not in chart_df.columns:
+        return None
+
+    chart_df[y_col] = pd.to_numeric(chart_df[y_col], errors="coerce")
+    chart_df = chart_df.dropna(subset=[y_col])
 
     if chart_df.empty:
         return None
 
+    chart_df = chart_df.sort_values(by=x_col)
     title = f"{x_col} / {y_col}"
     if chart_type == "折線圖":
         fig = px.line(chart_df, x=x_col, y=y_col, markers=True, title=title)
@@ -394,6 +387,12 @@ def make_chart(df, chart_type, x_col, y_mode, bar_color=None, lower_limit=None, 
             fig.add_hline(y=lower_limit, line_dash="dash", line_color="red", annotation_text="下限")
         if upper_limit is not None:
             fig.add_hline(y=upper_limit, line_dash="dash", line_color="green", annotation_text="上限")
+        if y_min is not None and y_max is not None and y_min >= y_max:
+            y_min = None
+            y_max = None
+        if y_min is not None or y_max is not None:
+            fig.update_yaxes(range=[y_min, y_max])
+        fig.update_layout(xaxis_type="category", xaxis_tickangle=-45)
     return fig
 
 
@@ -560,8 +559,21 @@ with tab_stats:
     vehicle_options = sorted(v for v in filtered["車號/最小成本"].dropna().astype(str).unique() if v.strip())
     stat_vehicle = st.multiselect("選擇要計算的車號/最小成本", vehicle_options, default=valid_default_list("stat_vehicle", vehicle_options))
 
+    stat_item_keyword = st.text_input("統計檢查項目關鍵字", value=setting_value("stat_item_keyword", "直徑"))
     stat_item_options = sorted(v for v in filtered["檢查項目"].dropna().astype(str).unique() if v.strip())
+    if stat_item_keyword:
+        stat_item_options = [item for item in stat_item_options if stat_item_keyword.lower() in item.lower()]
     stat_items = st.multiselect("選擇要計算的檢查項目", stat_item_options, default=valid_default_list("stat_items", stat_item_options))
+
+    group_options = ["車號/最小成本", "檢查結束日期", "檢查項目", "進階分類1", "進階分類2"]
+    stat_group_cols = st.multiselect(
+        "統計分組欄位",
+        group_options,
+        default=valid_default_list("stat_group_cols", group_options) or ["車號/最小成本"],
+    )
+
+    compare_options = ["最小值", "最大值", "平均值"]
+    compare_metric = st.selectbox("要拿來比較/畫圖的統計值", compare_options, index=valid_index("compare_metric_index", compare_options))
 
     limit_cols = st.columns(2)
     lower_limit_enabled = limit_cols[0].checkbox("啟用統計下限", value=setting_value("lower_limit_enabled", False))
@@ -572,18 +584,30 @@ with tab_stats:
     stats_source = filtered.copy()
     if stat_vehicle:
         stats_source = stats_source[stats_source["車號/最小成本"].isin(stat_vehicle)]
+    if stat_item_keyword:
+        stats_source = apply_keyword_filter(stats_source, "檢查項目", stat_item_keyword)
     if stat_items:
         stats_source = stats_source[stats_source["檢查項目"].isin(stat_items)]
 
     lower_value = lower_limit if lower_limit_enabled else None
     upper_value = upper_limit if upper_limit_enabled else None
-    stats_df = build_stats(stats_source, ["車號/最小成本", "檢查項目"], lower_value, upper_value)
+    stats_df = build_stats(stats_source, stat_group_cols, compare_metric, lower_value, upper_value)
+
+    stat_summary_cols = st.columns(4)
+    stat_summary_cols[0].metric("統計筆數", f"{len(stats_df):,}")
+    stat_summary_cols[1].metric("低於下限", f"{(stats_df['判定'] == '低於下限').sum():,}" if "判定" in stats_df else "0")
+    stat_summary_cols[2].metric("高於上限", f"{(stats_df['判定'] == '高於上限').sum():,}" if "判定" in stats_df else "0")
+    stat_summary_cols[3].metric("統計方式", compare_metric)
+
     st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
     if st.button("保留統計設定", use_container_width=True):
         update_saved_settings(
             stat_vehicle=stat_vehicle,
+            stat_item_keyword=stat_item_keyword,
             stat_items=stat_items,
+            stat_group_cols=stat_group_cols,
+            compare_metric_index=compare_options.index(compare_metric),
             lower_limit_enabled=lower_limit_enabled,
             lower_limit=lower_limit,
             upper_limit_enabled=upper_limit_enabled,
@@ -592,49 +616,73 @@ with tab_stats:
         st.success("已保留統計設定。")
 
 with tab_chart:
-    chart_cols = ["車號/最小成本", "檢查結束日期"]
-    left, middle, right = st.columns(3)
+    chart_data_mode = st.radio("圖表資料來源", ["統計結果", "篩選明細"], horizontal=True, index=valid_index("chart_data_mode_index", ["統計結果", "篩選明細"]))
+    chart_source = stats_df if chart_data_mode == "統計結果" else stats_source
+    chart_cols = [col for col in ["車號/最小成本", "檢查結束日期", "檢查項目", "進階分類1", "進階分類2"] if col in chart_source.columns]
     chart_types = ["長條圖", "折線圖", "圓餅圖"]
-    y_modes = ["檢查結果數值", "統計結果數值"]
-    chart_type = left.selectbox("圖表類型", chart_types, index=valid_index("chart_type_index", chart_types))
-    x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
-    y_mode = right.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
-    bar_color = st.color_picker("長條圖柱體顏色", value=setting_value("bar_color", "#2563EB"))
-
-    fig = make_chart(filtered, chart_type, x_col, y_mode, bar_color, lower_value, upper_value)
-    if fig is None:
-        st.info("目前篩選結果沒有可繪圖的資料。")
+    y_modes = [col for col in ["統計結果數值", "檢查結果數值", "最小值", "最大值", "平均值", "筆數"] if col in chart_source.columns]
+    if not chart_cols or not y_modes or chart_source.empty:
+        st.info("目前統計或篩選範圍沒有可繪圖的資料。")
     else:
-        st.plotly_chart(fig, use_container_width=True)
-        export_cols = st.columns(2)
-        chart_html = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
-        export_cols[0].download_button(
-            "匯出圖表 HTML",
-            data=chart_html,
-            file_name=f"圖表_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-            mime="text/html",
-            use_container_width=True,
+        left, middle, right = st.columns(3)
+        chart_type = left.selectbox("圖表類型", chart_types, index=valid_index("chart_type_index", chart_types))
+        x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
+        y_mode = right.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
+        bar_color = st.color_picker("長條圖柱體顏色", value=setting_value("bar_color", "#2563EB"))
+
+        axis_cols = st.columns(2)
+        y_range_enabled = axis_cols[0].checkbox("自訂 Y 軸範圍", value=setting_value("y_range_enabled", False))
+        y_min = axis_cols[0].number_input("Y 軸最小值", value=float(setting_value("y_min", 0.0)), disabled=not y_range_enabled)
+        y_max = axis_cols[1].number_input("Y 軸最大值", value=float(setting_value("y_max", 850.0)), disabled=not y_range_enabled)
+
+        fig = make_chart(
+            chart_source,
+            chart_type,
+            x_col,
+            y_mode,
+            bar_color,
+            lower_value,
+            upper_value,
+            y_min if y_range_enabled else None,
+            y_max if y_range_enabled else None,
         )
-        try:
-            chart_png = fig.to_image(format="png", scale=2)
-            export_cols[1].download_button(
-                "匯出圖表圖片",
-                data=chart_png,
-                file_name=f"圖表_{datetime.now().strftime('%Y%m%d_%H%M')}.png",
-                mime="image/png",
+        if fig is None:
+            st.info("目前篩選結果沒有可繪圖的資料。")
+        else:
+            st.plotly_chart(fig, use_container_width=True)
+            export_cols = st.columns(2)
+            chart_html = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
+            export_cols[0].download_button(
+                "匯出圖表 HTML",
+                data=chart_html,
+                file_name=f"圖表_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                mime="text/html",
                 use_container_width=True,
             )
-        except Exception:
-            export_cols[1].info("若要匯出 PNG，請確認已安裝 kaleido。")
+            try:
+                chart_png = fig.to_image(format="png", scale=2)
+                export_cols[1].download_button(
+                    "匯出圖表圖片",
+                    data=chart_png,
+                    file_name=f"圖表_{datetime.now().strftime('%Y%m%d_%H%M')}.png",
+                    mime="image/png",
+                    use_container_width=True,
+                )
+            except Exception:
+                export_cols[1].info("若要匯出 PNG，請確認已安裝 kaleido。")
 
-    if st.button("保留圖表設定", use_container_width=True):
-        update_saved_settings(
-            chart_type_index=chart_types.index(chart_type),
-            x_col_index=chart_cols.index(x_col),
-            y_mode_index=y_modes.index(y_mode),
-            bar_color=bar_color,
-        )
-        st.success("已保留圖表設定。")
+        if st.button("保留圖表設定", use_container_width=True):
+            update_saved_settings(
+                chart_data_mode_index=["統計結果", "篩選明細"].index(chart_data_mode),
+                chart_type_index=chart_types.index(chart_type),
+                x_col_index=chart_cols.index(x_col),
+                y_mode_index=y_modes.index(y_mode),
+                bar_color=bar_color,
+                y_range_enabled=y_range_enabled,
+                y_min=y_min,
+                y_max=y_max,
+            )
+            st.success("已保留圖表設定。")
 
 export_name = f"行動檢修平台整理_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 export_display = compact_repeated_values(
