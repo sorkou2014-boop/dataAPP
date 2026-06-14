@@ -316,7 +316,7 @@ def classify_traffic_light(value, traffic_ranges):
 
 
 def calculate_compare_value(stats_df, compare_metric, operation_left=None, operation_right=None, operation_value=None):
-    if compare_metric in ["最小值", "最大值", "平均值"]:
+    if compare_metric in ["原始值", "最小值", "最大值", "平均值"]:
         return stats_df[compare_metric]
 
     if compare_metric not in ["相加", "相減", "相乘", "相除"]:
@@ -398,8 +398,9 @@ def build_stats(
                 }
             ]
         )
+    stats_df["原始值"] = stats_df["最小值"].where(stats_df["筆數"] == 1)
 
-    if compare_metric not in ["最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]:
+    if compare_metric not in ["原始值", "最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]:
         compare_metric = ""
 
     stats_df["統計方式"] = compare_metric
@@ -431,6 +432,10 @@ def make_chart(
     traffic_color_enabled=False,
     traffic_colors=None,
     pie_label_mode="標籤+百分比",
+    series_col=None,
+    series_colors=None,
+    show_data_labels=False,
+    y_tick_interval=None,
 ):
     if df.empty:
         return None
@@ -445,10 +450,18 @@ def make_chart(
     if chart_df.empty:
         return None
 
-    chart_df = chart_df.sort_values(by=x_col)
+    chart_df = chart_df.sort_values(by=[series_col, x_col] if series_col and series_col in chart_df.columns else x_col)
     title = title or f"{x_col} / {y_col}"
     if chart_type == "折線圖":
-        fig = px.line(chart_df, x=x_col, y=y_col, markers=True, title=title)
+        fig = px.line(
+            chart_df,
+            x=x_col,
+            y=y_col,
+            color=series_col if series_col in chart_df.columns else None,
+            color_discrete_map=series_colors or None,
+            markers=True,
+            title=title,
+        )
     elif chart_type == "圓餅圖":
         fig = px.pie(chart_df, names=x_col, values=y_col, title=title)
         textinfo_map = {
@@ -460,7 +473,15 @@ def make_chart(
         }
         fig.update_traces(textinfo=textinfo_map.get(pie_label_mode, "label+percent"))
     else:
-        fig = px.bar(chart_df, x=x_col, y=y_col, title=title)
+        fig = px.bar(
+            chart_df,
+            x=x_col,
+            y=y_col,
+            color=series_col if series_col in chart_df.columns and not traffic_color_enabled else None,
+            color_discrete_map=series_colors or None,
+            title=title,
+            barmode="group",
+        )
         if traffic_color_enabled and "判定" in chart_df.columns:
             colors = traffic_colors or {}
             fig.update_traces(marker_color=[colors.get(value, bar_color) for value in chart_df["判定"]])
@@ -477,11 +498,20 @@ def make_chart(
             y_max = None
         if y_min is not None or y_max is not None:
             fig.update_yaxes(range=[y_min, y_max])
+        if y_tick_interval:
+            fig.update_yaxes(dtick=y_tick_interval)
         fig.update_layout(xaxis_type="category", xaxis_tickangle=-45)
         if x_label:
             fig.update_xaxes(title_text=x_label)
         if y_label:
             fig.update_yaxes(title_text=y_label)
+        if show_data_labels:
+            if chart_type == "折線圖":
+                fig.update_traces(mode="lines+markers+text", texttemplate="%{y:g}", textposition="top center")
+            else:
+                fig.update_traces(texttemplate="%{y:g}", textposition="outside")
+    elif show_data_labels and chart_type == "圓餅圖":
+        fig.update_traces(textposition="inside")
     return fig
 
 
@@ -665,16 +695,18 @@ with tab_stats:
     stat_group_cols = st.multiselect(
         "統計分組欄位",
         group_options,
-        default=valid_default_list("stat_group_cols", group_options) or ["車號/最小成本"],
+        default=valid_default_list("stat_group_cols", group_options) or ["車號/最小成本", "檢查項目"],
     )
+    if len(stat_items) > 1 and "檢查項目" not in stat_group_cols:
+        st.info("已選多個檢查項目；若要在統計或折線圖中分列顯示，建議將「檢查項目」加入統計分組欄位。")
 
-    compare_options = ["", "最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]
+    compare_options = ["", "原始值", "最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]
     compare_metric = st.selectbox("要拿來比較/畫圖的統計值", compare_options, index=valid_index("compare_metric_index", compare_options))
     operation_left = operation_right = None
     operation_value = None
     if compare_metric in ["相加", "相減", "相乘", "相除"]:
         operation_cols = st.columns([1, 1, 1])
-        operation_base_cols = ["最小值", "最大值", "平均值", "筆數"]
+        operation_base_cols = ["原始值", "最小值", "最大值", "平均值", "筆數"]
         operation_left = operation_cols[0].selectbox(
             "左側數值",
             operation_base_cols,
@@ -763,8 +795,8 @@ with tab_stats:
             stat_items=stat_items,
             stat_group_cols=stat_group_cols,
             compare_metric_index=compare_options.index(compare_metric),
-            operation_left_index=["最小值", "最大值", "平均值", "筆數"].index(operation_left) if operation_left else 0,
-            operation_right_index=(["最小值", "最大值", "平均值", "筆數", "自訂數值"].index(operation_right) if operation_right else 0),
+            operation_left_index=["原始值", "最小值", "最大值", "平均值", "筆數"].index(operation_left) if operation_left else 0,
+            operation_right_index=(["原始值", "最小值", "最大值", "平均值", "筆數", "自訂數值"].index(operation_right) if operation_right else 0),
             operation_value=operation_value if operation_value is not None else 1.0,
             range_mode_index=["不判定", "上下限", "紅黃綠燈"].index(range_mode),
             lower_limit=lower_limit if lower_limit is not None else 0.0,
@@ -784,7 +816,7 @@ with tab_chart:
     chart_source = stats_df if chart_data_mode == "統計結果" else stats_source
     chart_cols = [col for col in ["車號/最小成本", "檢查結束日期", "檢查項目", "進階分類1", "進階分類2"] if col in chart_source.columns]
     chart_types = ["長條圖", "折線圖", "圓餅圖"]
-    candidate_y_modes = ["統計結果數值", "檢查結果數值", "最小值", "最大值", "平均值", "筆數"]
+    candidate_y_modes = ["統計結果數值", "檢查結果數值", "原始值", "最小值", "最大值", "平均值", "筆數"]
     y_modes = [
         col
         for col in candidate_y_modes
@@ -798,6 +830,8 @@ with tab_chart:
         chart_type = left.selectbox("圖表類型", chart_types, index=valid_index("chart_type_index", chart_types))
         x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
         y_mode = right.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
+        series_options = [""] + [col for col in ["檢查項目", "進階分類1", "進階分類2", "車號/最小成本"] if col in chart_source.columns and col != x_col]
+        series_col = st.selectbox("系列欄位（多條線/多組柱體）", series_options, index=valid_index("series_col_index", series_options))
 
         st.markdown("##### 標題與座標名稱")
         label_cols = st.columns(3)
@@ -815,10 +849,21 @@ with tab_chart:
         y_max = None
         if chart_type != "圓餅圖":
             st.markdown("##### Y 軸範圍")
-            axis_cols = st.columns([1, 1, 1])
+            axis_cols = st.columns([1, 1, 1, 1])
             y_range_enabled = axis_cols[0].checkbox("自訂 Y 軸範圍", value=setting_value("y_range_enabled", False))
             y_min = axis_cols[1].number_input("Y 軸最小值", value=float(setting_value("y_min", 0.0)), disabled=not y_range_enabled)
             y_max = axis_cols[2].number_input("Y 軸最大值", value=float(setting_value("y_max", 850.0)), disabled=not y_range_enabled)
+            y_tick_interval = axis_cols[3].number_input(
+                "Y 軸間距",
+                min_value=0.0,
+                value=float(setting_value("y_tick_interval", 0.0)),
+                step=0.1,
+                help="例如 1~7 每格 0.5，就輸入 0.5。填 0 代表自動。",
+            )
+        else:
+            y_tick_interval = None
+
+        show_data_labels = st.checkbox("顯示資料標籤", value=setting_value("show_data_labels", False))
 
         st.markdown("##### 顏色")
         traffic_color_enabled = False
@@ -845,6 +890,18 @@ with tab_chart:
             "紅燈": red_color,
             "未分類": "#94A3B8",
         }
+        series_colors = {}
+        if series_col:
+            st.markdown("##### 系列顏色")
+            series_values = [value for value in chart_source[series_col].dropna().astype(str).unique().tolist() if value]
+            default_palette = ["#2563EB", "#EF4444", "#10B981", "#F59E0B", "#8B5CF6", "#06B6D4", "#64748B", "#EC4899"]
+            color_columns = st.columns(min(4, max(1, len(series_values))))
+            for idx, series_value in enumerate(series_values):
+                key = f"series_color_{series_col}_{series_value}"
+                series_colors[series_value] = color_columns[idx % len(color_columns)].color_picker(
+                    series_value,
+                    value=setting_value(key, default_palette[idx % len(default_palette)]),
+                )
 
         fig = make_chart(
             chart_source,
@@ -862,6 +919,10 @@ with tab_chart:
             traffic_color_enabled,
             traffic_colors,
             pie_label_mode,
+            series_col if series_col else None,
+            series_colors,
+            show_data_labels,
+            y_tick_interval if y_tick_interval and y_tick_interval > 0 else None,
         )
         if fig is None:
             st.info("目前篩選結果沒有可繪圖的資料。")
@@ -890,24 +951,30 @@ with tab_chart:
                 pass
 
         if st.button("保留圖表設定", use_container_width=True):
-            update_saved_settings(
-                chart_data_mode_index=["統計結果", "篩選明細"].index(chart_data_mode),
-                chart_type_index=chart_types.index(chart_type),
-                x_col_index=chart_cols.index(x_col),
-                y_mode_index=y_modes.index(y_mode),
-                bar_color=bar_color,
-                y_range_enabled=y_range_enabled,
-                y_min=y_min,
-                y_max=y_max,
-                chart_title=chart_title,
-                x_axis_label=x_axis_label,
-                y_axis_label=y_axis_label,
-                pie_label_mode_index=pie_label_modes.index(pie_label_mode),
-                traffic_color_enabled=traffic_color_enabled,
-                green_color=green_color,
-                yellow_color=yellow_color,
-                red_color=red_color,
-            )
+            chart_settings = {
+                "chart_data_mode_index": ["統計結果", "篩選明細"].index(chart_data_mode),
+                "chart_type_index": chart_types.index(chart_type),
+                "x_col_index": chart_cols.index(x_col),
+                "y_mode_index": y_modes.index(y_mode),
+                "series_col_index": series_options.index(series_col),
+                "bar_color": bar_color,
+                "y_range_enabled": y_range_enabled,
+                "y_min": y_min,
+                "y_max": y_max,
+                "y_tick_interval": y_tick_interval or 0.0,
+                "show_data_labels": show_data_labels,
+                "chart_title": chart_title,
+                "x_axis_label": x_axis_label,
+                "y_axis_label": y_axis_label,
+                "pie_label_mode_index": pie_label_modes.index(pie_label_mode),
+                "traffic_color_enabled": traffic_color_enabled,
+                "green_color": green_color,
+                "yellow_color": yellow_color,
+                "red_color": red_color,
+            }
+            for series_value, color in series_colors.items():
+                chart_settings[f"series_color_{series_col}_{series_value}"] = color
+            update_saved_settings(**chart_settings)
             st.success("已保留圖表設定。")
 
 export_name = f"行動檢修平台整理_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
