@@ -302,7 +302,20 @@ def to_excel_bytes(sheets):
     return output.getvalue()
 
 
-def build_stats(df, group_cols=None, compare_metric="最小值", lower_limit=None, upper_limit=None):
+def classify_traffic_light(value, traffic_ranges):
+    if value is None or pd.isna(value) or not traffic_ranges:
+        return ""
+
+    for name in ["綠燈", "黃燈", "紅燈"]:
+        lower, upper = traffic_ranges.get(name, (None, None))
+        lower_ok = lower is None or value >= lower
+        upper_ok = upper is None or value <= upper
+        if lower_ok and upper_ok:
+            return name
+    return "未分類"
+
+
+def build_stats(df, group_cols=None, compare_metric="", lower_limit=None, upper_limit=None, traffic_ranges=None):
     numeric = pd.to_numeric(df["檢查結果數值"], errors="coerce").dropna()
     if numeric.empty:
         return pd.DataFrame(
@@ -313,7 +326,7 @@ def build_stats(df, group_cols=None, compare_metric="最小值", lower_limit=Non
                     "最小值": None,
                     "最大值": None,
                     "平均值": None,
-                    "統計方式": compare_metric,
+                    "統計方式": compare_metric or "",
                     "統計結果數值": None,
                     "判定": "",
                 }
@@ -345,19 +358,37 @@ def build_stats(df, group_cols=None, compare_metric="最小值", lower_limit=Non
         )
 
     if compare_metric not in ["最小值", "最大值", "平均值"]:
-        compare_metric = "最小值"
+        compare_metric = ""
 
     stats_df["統計方式"] = compare_metric
-    stats_df["統計結果數值"] = stats_df[compare_metric]
+    stats_df["統計結果數值"] = stats_df[compare_metric] if compare_metric else None
     stats_df["判定"] = ""
-    if lower_limit is not None:
+    if compare_metric and traffic_ranges:
+        stats_df["判定"] = stats_df["統計結果數值"].apply(lambda value: classify_traffic_light(value, traffic_ranges))
+    elif compare_metric and lower_limit is not None:
         stats_df.loc[stats_df["統計結果數值"] < lower_limit, "判定"] = "低於下限"
-    if upper_limit is not None:
+    if compare_metric and upper_limit is not None:
         stats_df.loc[stats_df["統計結果數值"] > upper_limit, "判定"] = "高於上限"
     return stats_df
 
 
-def make_chart(df, chart_type, x_col, y_col, bar_color=None, lower_limit=None, upper_limit=None, y_min=None, y_max=None):
+def make_chart(
+    df,
+    chart_type,
+    x_col,
+    y_col,
+    bar_color=None,
+    lower_limit=None,
+    upper_limit=None,
+    y_min=None,
+    y_max=None,
+    title=None,
+    x_label=None,
+    y_label=None,
+    traffic_color_enabled=False,
+    traffic_colors=None,
+    pie_label_mode="標籤+百分比",
+):
     if df.empty:
         return None
 
@@ -372,14 +403,25 @@ def make_chart(df, chart_type, x_col, y_col, bar_color=None, lower_limit=None, u
         return None
 
     chart_df = chart_df.sort_values(by=x_col)
-    title = f"{x_col} / {y_col}"
+    title = title or f"{x_col} / {y_col}"
     if chart_type == "折線圖":
         fig = px.line(chart_df, x=x_col, y=y_col, markers=True, title=title)
     elif chart_type == "圓餅圖":
         fig = px.pie(chart_df, names=x_col, values=y_col, title=title)
+        textinfo_map = {
+            "標籤+百分比": "label+percent",
+            "標籤+數值": "label+value",
+            "百分比": "percent",
+            "數值": "value",
+            "全部": "label+percent+value",
+        }
+        fig.update_traces(textinfo=textinfo_map.get(pie_label_mode, "label+percent"))
     else:
         fig = px.bar(chart_df, x=x_col, y=y_col, title=title)
-        if bar_color:
+        if traffic_color_enabled and "判定" in chart_df.columns:
+            colors = traffic_colors or {}
+            fig.update_traces(marker_color=[colors.get(value, bar_color) for value in chart_df["判定"]])
+        elif bar_color:
             fig.update_traces(marker_color=bar_color)
 
     if chart_type != "圓餅圖":
@@ -393,11 +435,26 @@ def make_chart(df, chart_type, x_col, y_col, bar_color=None, lower_limit=None, u
         if y_min is not None or y_max is not None:
             fig.update_yaxes(range=[y_min, y_max])
         fig.update_layout(xaxis_type="category", xaxis_tickangle=-45)
+        if x_label:
+            fig.update_xaxes(title_text=x_label)
+        if y_label:
+            fig.update_yaxes(title_text=y_label)
     return fig
 
 
 def setting_value(key, default):
     return st.session_state.get("saved_settings", {}).get(key, default)
+
+
+def current_filter_settings():
+    return {
+        "selected_category1": selected_category1,
+        "category1_keyword": category1_keyword,
+        "selected_category2": selected_category2,
+        "category2_keyword": category2_keyword,
+        "selected_items": selected_items,
+        "item_keyword": item_keyword,
+    }
 
 
 def valid_default_list(key, options):
@@ -434,6 +491,8 @@ if "all_data" not in st.session_state:
     st.session_state.all_data = pd.DataFrame()
 if "saved_settings" not in st.session_state:
     st.session_state.saved_settings = {}
+if "filter_profiles" not in st.session_state:
+    st.session_state.filter_profiles = {}
 
 if uploaded_files and st.button("開始整理", use_container_width=True):
     start_time = time.time()
@@ -463,15 +522,26 @@ if all_data.empty:
 st.success(st.session_state.get("process_msg", "資料已整理完成。"))
 
 with st.sidebar:
-    st.header("篩選")
+    st.header("1. 篩選資料")
 
-    settings_file = st.file_uploader("匯入設定檔", type=["json"], accept_multiple_files=False)
+    settings_file = st.file_uploader("匯入篩選設定檔", type=["json"], accept_multiple_files=False)
     if settings_file is not None and st.button("套用設定檔", use_container_width=True):
         try:
-            st.session_state.saved_settings = json.loads(settings_file.getvalue().decode("utf-8"))
+            loaded_settings = json.loads(settings_file.getvalue().decode("utf-8"))
+            if "profiles" in loaded_settings:
+                st.session_state.filter_profiles.update(loaded_settings["profiles"])
+            else:
+                st.session_state.saved_settings = loaded_settings
             st.rerun()
         except Exception as exc:
             st.warning(f"設定檔讀取失敗：{exc}")
+
+    profile_names = sorted(st.session_state.filter_profiles.keys())
+    if profile_names:
+        selected_profile = st.selectbox("套用已儲存篩選", [""] + profile_names)
+        if selected_profile and st.button("套用選取篩選", use_container_width=True):
+            st.session_state.saved_settings = st.session_state.filter_profiles[selected_profile].copy()
+            st.rerun()
 
     category1_options = sorted(v for v in all_data["進階分類1"].dropna().astype(str).unique() if v.strip())
     selected_category1 = st.multiselect("進階分類1", category1_options, default=valid_default_list("selected_category1", category1_options))
@@ -493,24 +563,19 @@ with st.sidebar:
     selected_items = st.multiselect("檢查項目", item_options, default=valid_default_list("selected_items", item_options))
     item_keyword = st.text_input("檢查項目關鍵字", value=setting_value("item_keyword", ""))
 
-    result_keyword = st.text_input("檢查結果關鍵字", value=setting_value("result_keyword", ""))
-
-    if st.button("保留目前設定", use_container_width=True):
-        update_saved_settings(
-            selected_category1=selected_category1,
-            category1_keyword=category1_keyword,
-            selected_category2=selected_category2,
-            category2_keyword=category2_keyword,
-            selected_items=selected_items,
-            item_keyword=item_keyword,
-            result_keyword=result_keyword,
-        )
-        st.success("已保留目前篩選設定。")
+    profile_name = st.text_input("儲存篩選名稱", value=setting_value("profile_name", ""))
+    if st.button("儲存目前篩選", use_container_width=True):
+        if profile_name.strip():
+            st.session_state.filter_profiles[profile_name.strip()] = current_filter_settings()
+            st.session_state.saved_settings = current_filter_settings()
+            st.success(f"已儲存篩選：{profile_name.strip()}")
+        else:
+            st.warning("請先輸入篩選名稱。")
 
     st.download_button(
-        "下載設定檔",
-        data=json.dumps(st.session_state.saved_settings, ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="行動檢修平台設定.json",
+        "下載全部篩選設定",
+        data=json.dumps({"profiles": st.session_state.filter_profiles}, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="行動檢修平台篩選設定.json",
         mime="application/json",
         use_container_width=True,
     )
@@ -526,13 +591,8 @@ if selected_items:
 filtered = apply_keyword_filter(filtered, "進階分類1", category1_keyword)
 filtered = apply_keyword_filter(filtered, "進階分類2", category2_keyword)
 filtered = apply_keyword_filter(filtered, "檢查項目", item_keyword)
-filtered = apply_keyword_filter(filtered, "檢查結果", result_keyword)
 
-summary_cols = st.columns(4)
-summary_cols[0].metric("明細筆數", f"{len(filtered):,}")
-summary_cols[1].metric("工單數", f"{filtered['工單編號'].nunique():,}")
-summary_cols[2].metric("車號/最小成本", f"{filtered['車號/最小成本'].nunique():,}")
-summary_cols[3].metric("可計算數值", f"{filtered['檢查結果數值'].notna().sum():,}")
+st.metric("搜尋結果工單數", f"{filtered['工單編號'].nunique():,}")
 
 tab_list, tab_stats, tab_chart = st.tabs(["結果清單", "統計", "圖表"])
 
@@ -547,7 +607,6 @@ with tab_list:
         "檢查項目",
         "檢查結果數值",
         "單位",
-        "執行者",
     ]
     display_df = compact_repeated_values(
         filtered[display_cols],
@@ -556,6 +615,9 @@ with tab_list:
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 with tab_stats:
+    st.subheader("2. 設定統計範圍")
+    st.caption("車號或檢查項目沒有勾選時，系統會自動視為全選。")
+
     vehicle_options = sorted(v for v in filtered["車號/最小成本"].dropna().astype(str).unique() if v.strip())
     stat_vehicle = st.multiselect("選擇要計算的車號/最小成本", vehicle_options, default=valid_default_list("stat_vehicle", vehicle_options))
 
@@ -572,14 +634,37 @@ with tab_stats:
         default=valid_default_list("stat_group_cols", group_options) or ["車號/最小成本"],
     )
 
-    compare_options = ["最小值", "最大值", "平均值"]
+    compare_options = ["", "最小值", "最大值", "平均值"]
     compare_metric = st.selectbox("要拿來比較/畫圖的統計值", compare_options, index=valid_index("compare_metric_index", compare_options))
 
-    limit_cols = st.columns(2)
-    lower_limit_enabled = limit_cols[0].checkbox("啟用統計下限", value=setting_value("lower_limit_enabled", False))
-    lower_limit = limit_cols[0].number_input("統計下限", value=float(setting_value("lower_limit", 0.0)), disabled=not lower_limit_enabled)
-    upper_limit_enabled = limit_cols[1].checkbox("啟用統計上限", value=setting_value("upper_limit_enabled", False))
-    upper_limit = limit_cols[1].number_input("統計上限", value=float(setting_value("upper_limit", 0.0)), disabled=not upper_limit_enabled)
+    st.subheader("3. 設定判定範圍")
+    range_mode = st.radio(
+        "統計判定方式",
+        ["不判定", "上下限", "紅黃綠燈"],
+        horizontal=True,
+        index=valid_index("range_mode_index", ["不判定", "上下限", "紅黃綠燈"]),
+    )
+
+    lower_limit = upper_limit = None
+    traffic_ranges = None
+    if range_mode == "上下限":
+        limit_cols = st.columns(2)
+        lower_limit = limit_cols[0].number_input("統計下限", value=float(setting_value("lower_limit", 0.0)))
+        upper_limit = limit_cols[1].number_input("統計上限", value=float(setting_value("upper_limit", 0.0)))
+    elif range_mode == "紅黃綠燈":
+        st.caption("範圍採含頭含尾判定。例：綠燈 788 到 850、黃燈 782 到 787、紅燈 775 到 781。")
+        traffic_cols = st.columns(3)
+        green_min = traffic_cols[0].number_input("綠燈最小值", value=float(setting_value("green_min", 788.0)))
+        green_max = traffic_cols[0].number_input("綠燈最大值", value=float(setting_value("green_max", 850.0)))
+        yellow_min = traffic_cols[1].number_input("黃燈最小值", value=float(setting_value("yellow_min", 782.0)))
+        yellow_max = traffic_cols[1].number_input("黃燈最大值", value=float(setting_value("yellow_max", 787.0)))
+        red_min = traffic_cols[2].number_input("紅燈最小值", value=float(setting_value("red_min", 775.0)))
+        red_max = traffic_cols[2].number_input("紅燈最大值", value=float(setting_value("red_max", 781.0)))
+        traffic_ranges = {
+            "綠燈": (green_min, green_max),
+            "黃燈": (yellow_min, yellow_max),
+            "紅燈": (red_min, red_max),
+        }
 
     stats_source = filtered.copy()
     if stat_vehicle:
@@ -589,15 +674,20 @@ with tab_stats:
     if stat_items:
         stats_source = stats_source[stats_source["檢查項目"].isin(stat_items)]
 
-    lower_value = lower_limit if lower_limit_enabled else None
-    upper_value = upper_limit if upper_limit_enabled else None
-    stats_df = build_stats(stats_source, stat_group_cols, compare_metric, lower_value, upper_value)
+    lower_value = lower_limit if range_mode == "上下限" else None
+    upper_value = upper_limit if range_mode == "上下限" else None
+    stats_df = build_stats(stats_source, stat_group_cols, compare_metric, lower_value, upper_value, traffic_ranges)
 
     stat_summary_cols = st.columns(4)
     stat_summary_cols[0].metric("統計筆數", f"{len(stats_df):,}")
-    stat_summary_cols[1].metric("低於下限", f"{(stats_df['判定'] == '低於下限').sum():,}" if "判定" in stats_df else "0")
-    stat_summary_cols[2].metric("高於上限", f"{(stats_df['判定'] == '高於上限').sum():,}" if "判定" in stats_df else "0")
-    stat_summary_cols[3].metric("統計方式", compare_metric)
+    if range_mode == "紅黃綠燈":
+        stat_summary_cols[1].metric("綠燈", f"{(stats_df['判定'] == '綠燈').sum():,}" if "判定" in stats_df else "0")
+        stat_summary_cols[2].metric("黃燈", f"{(stats_df['判定'] == '黃燈').sum():,}" if "判定" in stats_df else "0")
+        stat_summary_cols[3].metric("紅燈", f"{(stats_df['判定'] == '紅燈').sum():,}" if "判定" in stats_df else "0")
+    else:
+        stat_summary_cols[1].metric("低於下限", f"{(stats_df['判定'] == '低於下限').sum():,}" if "判定" in stats_df else "0")
+        stat_summary_cols[2].metric("高於上限", f"{(stats_df['判定'] == '高於上限').sum():,}" if "判定" in stats_df else "0")
+        stat_summary_cols[3].metric("統計方式", compare_metric or "未指定")
 
     st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
@@ -608,19 +698,30 @@ with tab_stats:
             stat_items=stat_items,
             stat_group_cols=stat_group_cols,
             compare_metric_index=compare_options.index(compare_metric),
-            lower_limit_enabled=lower_limit_enabled,
-            lower_limit=lower_limit,
-            upper_limit_enabled=upper_limit_enabled,
-            upper_limit=upper_limit,
+            range_mode_index=["不判定", "上下限", "紅黃綠燈"].index(range_mode),
+            lower_limit=lower_limit if lower_limit is not None else 0.0,
+            upper_limit=upper_limit if upper_limit is not None else 0.0,
+            green_min=traffic_ranges["綠燈"][0] if traffic_ranges else 788.0,
+            green_max=traffic_ranges["綠燈"][1] if traffic_ranges else 850.0,
+            yellow_min=traffic_ranges["黃燈"][0] if traffic_ranges else 782.0,
+            yellow_max=traffic_ranges["黃燈"][1] if traffic_ranges else 787.0,
+            red_min=traffic_ranges["紅燈"][0] if traffic_ranges else 775.0,
+            red_max=traffic_ranges["紅燈"][1] if traffic_ranges else 781.0,
         )
         st.success("已保留統計設定。")
 
 with tab_chart:
+    st.subheader("4. 製作圖表")
     chart_data_mode = st.radio("圖表資料來源", ["統計結果", "篩選明細"], horizontal=True, index=valid_index("chart_data_mode_index", ["統計結果", "篩選明細"]))
     chart_source = stats_df if chart_data_mode == "統計結果" else stats_source
     chart_cols = [col for col in ["車號/最小成本", "檢查結束日期", "檢查項目", "進階分類1", "進階分類2"] if col in chart_source.columns]
     chart_types = ["長條圖", "折線圖", "圓餅圖"]
-    y_modes = [col for col in ["統計結果數值", "檢查結果數值", "最小值", "最大值", "平均值", "筆數"] if col in chart_source.columns]
+    candidate_y_modes = ["統計結果數值", "檢查結果數值", "最小值", "最大值", "平均值", "筆數"]
+    y_modes = [
+        col
+        for col in candidate_y_modes
+        if col in chart_source.columns and pd.to_numeric(chart_source[col], errors="coerce").notna().any()
+    ]
     if not chart_cols or not y_modes or chart_source.empty:
         st.info("目前統計或篩選範圍沒有可繪圖的資料。")
     else:
@@ -628,12 +729,36 @@ with tab_chart:
         chart_type = left.selectbox("圖表類型", chart_types, index=valid_index("chart_type_index", chart_types))
         x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
         y_mode = right.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
-        bar_color = st.color_picker("長條圖柱體顏色", value=setting_value("bar_color", "#2563EB"))
+
+        label_cols = st.columns(3)
+        chart_title = label_cols[0].text_input("圖表標題", value=setting_value("chart_title", ""))
+        x_axis_label = label_cols[1].text_input("X 軸名稱", value=setting_value("x_axis_label", x_col))
+        y_axis_label = label_cols[2].text_input("Y 軸名稱", value=setting_value("y_axis_label", y_mode))
+
+        pie_label_modes = ["標籤+百分比", "標籤+數值", "百分比", "數值", "全部"]
+        pie_label_mode = st.selectbox("圓餅圖標籤呈現方式", pie_label_modes, index=valid_index("pie_label_mode_index", pie_label_modes))
 
         axis_cols = st.columns(2)
         y_range_enabled = axis_cols[0].checkbox("自訂 Y 軸範圍", value=setting_value("y_range_enabled", False))
         y_min = axis_cols[0].number_input("Y 軸最小值", value=float(setting_value("y_min", 0.0)), disabled=not y_range_enabled)
         y_max = axis_cols[1].number_input("Y 軸最大值", value=float(setting_value("y_max", 850.0)), disabled=not y_range_enabled)
+
+        color_cols = st.columns(4)
+        traffic_color_enabled = color_cols[0].checkbox(
+            "依紅黃綠燈上色",
+            value=setting_value("traffic_color_enabled", False),
+            disabled=range_mode != "紅黃綠燈" or "判定" not in chart_source.columns or chart_type != "長條圖",
+        )
+        bar_color = color_cols[1].color_picker("一般柱體顏色", value=setting_value("bar_color", "#2563EB"))
+        green_color = color_cols[2].color_picker("綠燈顏色", value=setting_value("green_color", "#10B981"))
+        yellow_color = color_cols[3].color_picker("黃燈顏色", value=setting_value("yellow_color", "#F59E0B"))
+        red_color = st.color_picker("紅燈顏色", value=setting_value("red_color", "#EF4444"))
+        traffic_colors = {
+            "綠燈": green_color,
+            "黃燈": yellow_color,
+            "紅燈": red_color,
+            "未分類": "#94A3B8",
+        }
 
         fig = make_chart(
             chart_source,
@@ -645,6 +770,12 @@ with tab_chart:
             upper_value,
             y_min if y_range_enabled else None,
             y_max if y_range_enabled else None,
+            chart_title,
+            x_axis_label,
+            y_axis_label,
+            traffic_color_enabled,
+            traffic_colors,
+            pie_label_mode,
         )
         if fig is None:
             st.info("目前篩選結果沒有可繪圖的資料。")
@@ -681,6 +812,14 @@ with tab_chart:
                 y_range_enabled=y_range_enabled,
                 y_min=y_min,
                 y_max=y_max,
+                chart_title=chart_title,
+                x_axis_label=x_axis_label,
+                y_axis_label=y_axis_label,
+                pie_label_mode_index=pie_label_modes.index(pie_label_mode),
+                traffic_color_enabled=traffic_color_enabled,
+                green_color=green_color,
+                yellow_color=yellow_color,
+                red_color=red_color,
             )
             st.success("已保留圖表設定。")
 
