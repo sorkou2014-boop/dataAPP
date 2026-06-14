@@ -315,7 +315,49 @@ def classify_traffic_light(value, traffic_ranges):
     return "未分類"
 
 
-def build_stats(df, group_cols=None, compare_metric="", lower_limit=None, upper_limit=None, traffic_ranges=None):
+def calculate_compare_value(stats_df, compare_metric, operation_left=None, operation_right=None, operation_value=None):
+    if compare_metric in ["最小值", "最大值", "平均值"]:
+        return stats_df[compare_metric]
+
+    if compare_metric not in ["相加", "相減", "相乘", "相除"]:
+        return None
+
+    operation_left = operation_left if operation_left in stats_df.columns else "平均值"
+    left_value = pd.to_numeric(stats_df[operation_left], errors="coerce")
+
+    if operation_right == "自訂數值":
+        right_value = operation_value
+    elif operation_right in stats_df.columns:
+        right_value = pd.to_numeric(stats_df[operation_right], errors="coerce")
+    else:
+        right_value = 0 if compare_metric in ["相加", "相減"] else 1
+
+    if compare_metric == "相加":
+        return left_value + right_value
+    if compare_metric == "相減":
+        return left_value - right_value
+    if compare_metric == "相乘":
+        return left_value * right_value
+    if compare_metric == "相除":
+        if isinstance(right_value, pd.Series):
+            return left_value / right_value.replace(0, pd.NA)
+        if right_value == 0:
+            return pd.Series([pd.NA] * len(stats_df), index=stats_df.index)
+        return left_value / right_value
+    return None
+
+
+def build_stats(
+    df,
+    group_cols=None,
+    compare_metric="",
+    lower_limit=None,
+    upper_limit=None,
+    traffic_ranges=None,
+    operation_left=None,
+    operation_right=None,
+    operation_value=None,
+):
     numeric = pd.to_numeric(df["檢查結果數值"], errors="coerce").dropna()
     if numeric.empty:
         return pd.DataFrame(
@@ -357,11 +399,12 @@ def build_stats(df, group_cols=None, compare_metric="", lower_limit=None, upper_
             ]
         )
 
-    if compare_metric not in ["最小值", "最大值", "平均值"]:
+    if compare_metric not in ["最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]:
         compare_metric = ""
 
     stats_df["統計方式"] = compare_metric
-    stats_df["統計結果數值"] = stats_df[compare_metric] if compare_metric else None
+    compare_value = calculate_compare_value(stats_df, compare_metric, operation_left, operation_right, operation_value)
+    stats_df["統計結果數值"] = compare_value if compare_value is not None else None
     stats_df["判定"] = ""
     if compare_metric and traffic_ranges:
         stats_df["判定"] = stats_df["統計結果數值"].apply(lambda value: classify_traffic_light(value, traffic_ranges))
@@ -634,8 +677,29 @@ with tab_stats:
         default=valid_default_list("stat_group_cols", group_options) or ["車號/最小成本"],
     )
 
-    compare_options = ["", "最小值", "最大值", "平均值"]
+    compare_options = ["", "最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]
     compare_metric = st.selectbox("要拿來比較/畫圖的統計值", compare_options, index=valid_index("compare_metric_index", compare_options))
+    operation_left = operation_right = None
+    operation_value = None
+    if compare_metric in ["相加", "相減", "相乘", "相除"]:
+        operation_cols = st.columns([1, 1, 1])
+        operation_base_cols = ["最小值", "最大值", "平均值", "筆數"]
+        operation_left = operation_cols[0].selectbox(
+            "左側數值",
+            operation_base_cols,
+            index=valid_index("operation_left_index", operation_base_cols),
+        )
+        operation_right_options = operation_base_cols + ["自訂數值"]
+        operation_right = operation_cols[1].selectbox(
+            "右側數值",
+            operation_right_options,
+            index=valid_index("operation_right_index", operation_right_options),
+        )
+        operation_value = operation_cols[2].number_input(
+            "自訂數值",
+            value=float(setting_value("operation_value", 1.0)),
+            disabled=operation_right != "自訂數值",
+        )
 
     st.subheader("3. 設定判定範圍")
     range_mode = st.radio(
@@ -676,7 +740,17 @@ with tab_stats:
 
     lower_value = lower_limit if range_mode == "上下限" else None
     upper_value = upper_limit if range_mode == "上下限" else None
-    stats_df = build_stats(stats_source, stat_group_cols, compare_metric, lower_value, upper_value, traffic_ranges)
+    stats_df = build_stats(
+        stats_source,
+        stat_group_cols,
+        compare_metric,
+        lower_value,
+        upper_value,
+        traffic_ranges,
+        operation_left,
+        operation_right,
+        operation_value,
+    )
 
     stat_summary_cols = st.columns(4)
     stat_summary_cols[0].metric("統計筆數", f"{len(stats_df):,}")
@@ -698,6 +772,9 @@ with tab_stats:
             stat_items=stat_items,
             stat_group_cols=stat_group_cols,
             compare_metric_index=compare_options.index(compare_metric),
+            operation_left_index=["最小值", "最大值", "平均值", "筆數"].index(operation_left) if operation_left else 0,
+            operation_right_index=(["最小值", "最大值", "平均值", "筆數", "自訂數值"].index(operation_right) if operation_right else 0),
+            operation_value=operation_value if operation_value is not None else 1.0,
             range_mode_index=["不判定", "上下限", "紅黃綠燈"].index(range_mode),
             lower_limit=lower_limit if lower_limit is not None else 0.0,
             upper_limit=upper_limit if upper_limit is not None else 0.0,
@@ -725,34 +802,52 @@ with tab_chart:
     if not chart_cols or not y_modes or chart_source.empty:
         st.info("目前統計或篩選範圍沒有可繪圖的資料。")
     else:
+        st.markdown("##### 資料與欄位")
         left, middle, right = st.columns(3)
         chart_type = left.selectbox("圖表類型", chart_types, index=valid_index("chart_type_index", chart_types))
         x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
         y_mode = right.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
 
+        st.markdown("##### 標題與座標名稱")
         label_cols = st.columns(3)
         chart_title = label_cols[0].text_input("圖表標題", value=setting_value("chart_title", ""))
         x_axis_label = label_cols[1].text_input("X 軸名稱", value=setting_value("x_axis_label", x_col))
         y_axis_label = label_cols[2].text_input("Y 軸名稱", value=setting_value("y_axis_label", y_mode))
 
         pie_label_modes = ["標籤+百分比", "標籤+數值", "百分比", "數值", "全部"]
-        pie_label_mode = st.selectbox("圓餅圖標籤呈現方式", pie_label_modes, index=valid_index("pie_label_mode_index", pie_label_modes))
+        pie_label_mode = "標籤+百分比"
+        if chart_type == "圓餅圖":
+            pie_label_mode = st.selectbox("圓餅圖標籤呈現方式", pie_label_modes, index=valid_index("pie_label_mode_index", pie_label_modes))
 
-        axis_cols = st.columns(2)
-        y_range_enabled = axis_cols[0].checkbox("自訂 Y 軸範圍", value=setting_value("y_range_enabled", False))
-        y_min = axis_cols[0].number_input("Y 軸最小值", value=float(setting_value("y_min", 0.0)), disabled=not y_range_enabled)
-        y_max = axis_cols[1].number_input("Y 軸最大值", value=float(setting_value("y_max", 850.0)), disabled=not y_range_enabled)
+        y_range_enabled = False
+        y_min = None
+        y_max = None
+        if chart_type != "圓餅圖":
+            st.markdown("##### Y 軸範圍")
+            axis_cols = st.columns([1, 1, 1])
+            y_range_enabled = axis_cols[0].checkbox("自訂 Y 軸範圍", value=setting_value("y_range_enabled", False))
+            y_min = axis_cols[1].number_input("Y 軸最小值", value=float(setting_value("y_min", 0.0)), disabled=not y_range_enabled)
+            y_max = axis_cols[2].number_input("Y 軸最大值", value=float(setting_value("y_max", 850.0)), disabled=not y_range_enabled)
 
-        color_cols = st.columns(4)
-        traffic_color_enabled = color_cols[0].checkbox(
-            "依紅黃綠燈上色",
-            value=setting_value("traffic_color_enabled", False),
-            disabled=range_mode != "紅黃綠燈" or "判定" not in chart_source.columns or chart_type != "長條圖",
-        )
-        bar_color = color_cols[1].color_picker("一般柱體顏色", value=setting_value("bar_color", "#2563EB"))
-        green_color = color_cols[2].color_picker("綠燈顏色", value=setting_value("green_color", "#10B981"))
-        yellow_color = color_cols[3].color_picker("黃燈顏色", value=setting_value("yellow_color", "#F59E0B"))
-        red_color = st.color_picker("紅燈顏色", value=setting_value("red_color", "#EF4444"))
+        st.markdown("##### 顏色")
+        traffic_color_enabled = False
+        green_color = setting_value("green_color", "#10B981")
+        yellow_color = setting_value("yellow_color", "#F59E0B")
+        red_color = setting_value("red_color", "#EF4444")
+        if chart_type == "長條圖":
+            color_cols = st.columns(4)
+            traffic_color_enabled = color_cols[0].checkbox(
+                "依紅黃綠燈上色",
+                value=setting_value("traffic_color_enabled", False),
+                disabled=range_mode != "紅黃綠燈" or "判定" not in chart_source.columns,
+            )
+            bar_color = color_cols[1].color_picker("一般柱體顏色", value=setting_value("bar_color", "#2563EB"))
+            green_color = color_cols[2].color_picker("綠燈顏色", value=green_color)
+            yellow_color = color_cols[3].color_picker("黃燈顏色", value=yellow_color)
+            red_color = st.color_picker("紅燈顏色", value=red_color)
+        else:
+            bar_color = setting_value("bar_color", "#2563EB")
+            st.caption("長條圖可設定柱體顏色；其他圖表使用預設配色。")
         traffic_colors = {
             "綠燈": green_color,
             "黃燈": yellow_color,
@@ -781,6 +876,7 @@ with tab_chart:
             st.info("目前篩選結果沒有可繪圖的資料。")
         else:
             st.plotly_chart(fig, use_container_width=True)
+            st.markdown("##### 匯出圖表")
             export_cols = st.columns(2)
             chart_html = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
             export_cols[0].download_button(
