@@ -11,7 +11,7 @@ import plotly.express as px
 import streamlit as st
 
 
-st.set_page_config(page_title="行動檢修平台通用資料整理", layout="wide")
+st.set_page_config(page_title="自訂統計資料整理", layout="wide")
 
 
 META_LABELS = {
@@ -521,7 +521,7 @@ def update_saved_settings(**kwargs):
     st.session_state.saved_settings = settings
 
 
-st.title("行動檢修平台通用資料整理")
+st.title("自訂統計資料整理")
 st.caption("多檔 Excel 匯入、進階分類/檢查項目篩選、結果清單、統計與圖表匯出")
 
 uploaded_files = st.file_uploader(
@@ -605,15 +605,6 @@ with st.sidebar:
     item_options = sorted(v for v in item_options_source["檢查項目"].dropna().astype(str).unique() if v.strip())
     selected_items = st.multiselect("檢查項目", item_options, default=valid_default_list("selected_items", item_options))
     item_keyword = st.text_input("檢查項目關鍵字", value=setting_value("item_keyword", ""))
-
-    profile_name = st.text_input("儲存篩選名稱", value=setting_value("profile_name", ""))
-    if st.button("儲存目前篩選", use_container_width=True):
-        if profile_name.strip():
-            st.session_state.filter_profiles[profile_name.strip()] = current_filter_settings()
-            st.session_state.saved_settings = current_filter_settings()
-            st.success(f"已儲存篩選：{profile_name.strip()}")
-        else:
-            st.warning("請先輸入篩選名稱。")
 
     st.download_button(
         "下載全部篩選設定",
@@ -835,7 +826,7 @@ with tab_chart:
         yellow_color = setting_value("yellow_color", "#F59E0B")
         red_color = setting_value("red_color", "#EF4444")
         if chart_type == "長條圖":
-            color_cols = st.columns(4)
+            color_cols = st.columns(5)
             traffic_color_enabled = color_cols[0].checkbox(
                 "依紅黃綠燈上色",
                 value=setting_value("traffic_color_enabled", False),
@@ -844,7 +835,7 @@ with tab_chart:
             bar_color = color_cols[1].color_picker("一般柱體顏色", value=setting_value("bar_color", "#2563EB"))
             green_color = color_cols[2].color_picker("綠燈顏色", value=green_color)
             yellow_color = color_cols[3].color_picker("黃燈顏色", value=yellow_color)
-            red_color = st.color_picker("紅燈顏色", value=red_color)
+            red_color = color_cols[4].color_picker("紅燈顏色", value=red_color)
         else:
             bar_color = setting_value("bar_color", "#2563EB")
             st.caption("長條圖可設定柱體顏色；其他圖表使用預設配色。")
@@ -896,7 +887,7 @@ with tab_chart:
                     use_container_width=True,
                 )
             except Exception:
-                export_cols[1].info("若要匯出 PNG，請確認已安裝 kaleido。")
+                pass
 
         if st.button("保留圖表設定", use_container_width=True):
             update_saved_settings(
