@@ -17,17 +17,17 @@ st.markdown(
     """
     <style>
     :root {
-        --app-bg: #F6F8FB;
-        --panel-bg: #FFFFFF;
-        --panel-soft: #F9FAFB;
-        --text-main: #172033;
-        --text-muted: #5F6B7A;
-        --line: #DDE3EA;
-        --primary: #2563EB;
-        --primary-soft: #EAF1FF;
-        --accent: #0F766E;
-        --accent-soft: #E8F6F3;
-        --warning-soft: #FFF7E6;
+        --app-bg: #080D17;
+        --panel-bg: #111827;
+        --panel-soft: #172033;
+        --text-main: #F8FAFC;
+        --text-muted: #AAB6C7;
+        --line: #263245;
+        --primary: #38BDF8;
+        --primary-soft: #0B2A3A;
+        --accent: #34D399;
+        --accent-soft: #0B2F28;
+        --warning-soft: #34280A;
     }
     .main .block-container {
         max-width: 1480px;
@@ -36,7 +36,9 @@ st.markdown(
     }
     .stApp {
         background:
-            linear-gradient(180deg, #FFFFFF 0%, var(--app-bg) 260px, var(--app-bg) 100%);
+            radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 34rem),
+            radial-gradient(circle at top right, rgba(52, 211, 153, 0.12), transparent 30rem),
+            linear-gradient(180deg, #0B1120 0%, var(--app-bg) 38rem, #070B13 100%);
         color: var(--text-main);
     }
     html, body, [class*="css"] {
@@ -60,14 +62,14 @@ st.markdown(
         background: var(--panel-bg);
         border: 1px solid var(--line);
         border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(23, 32, 51, 0.06);
+        box-shadow: 0 14px 38px rgba(0, 0, 0, 0.26);
     }
     div[data-testid="stMetric"] {
         border: 1px solid var(--line);
         border-radius: 12px;
         padding: 14px 16px;
         background: var(--panel-bg);
-        box-shadow: 0 4px 14px rgba(23, 32, 51, 0.05);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
     }
     div[data-testid="stMetric"] label,
     div[data-testid="stMetric"] [data-testid="stMetricValue"] {
@@ -83,7 +85,7 @@ st.markdown(
     }
     section[data-testid="stSidebar"] {
         border-right: 1px solid var(--line);
-        background: #FBFCFE;
+        background: #0B1120;
     }
     section[data-testid="stSidebar"] * {
         color: var(--text-main);
@@ -92,9 +94,12 @@ st.markdown(
     .stNumberInput input,
     .stSelectbox div[data-baseweb="select"],
     .stMultiSelect div[data-baseweb="select"] {
-        background: #FFFFFF;
+        background: #0F172A;
         color: var(--text-main);
         border-color: var(--line);
+    }
+    .stTextInput input::placeholder {
+        color: #7B8798;
     }
     .stButton > button,
     .stDownloadButton > button {
@@ -111,7 +116,7 @@ st.markdown(
         color: #FFFFFF;
     }
     div[role="radiogroup"] label {
-        background: #FFFFFF;
+        background: #0F172A;
         border: 1px solid var(--line);
         border-radius: 999px;
         padding: 4px 10px;
@@ -132,9 +137,9 @@ st.markdown(
         border: 1px solid var(--line);
         border-radius: 12px;
         padding: 14px 16px;
-        background: var(--panel-bg);
+        background: linear-gradient(180deg, #121C2E 0%, #0F172A 100%);
         min-height: 94px;
-        box-shadow: 0 8px 24px rgba(23, 32, 51, 0.06);
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.25);
     }
     .workflow-step strong {
         display: block;
@@ -183,6 +188,7 @@ st.markdown(
         border-radius: 10px;
         overflow: hidden;
         border: 1px solid var(--line);
+        background: var(--panel-bg);
     }
     @media (max-width: 900px) {
         .workflow {
@@ -731,7 +737,16 @@ def make_chart(
         fig.update_layout(showlegend=True, legend_title_text=series_col or ("判定" if traffic_color_enabled else "圖例"))
     elif show_data_labels and chart_type == "圓餅圖":
         fig.update_traces(textposition="inside")
-    fig.update_layout(showlegend=True, paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
+    fig.update_layout(
+        showlegend=True,
+        paper_bgcolor="#111827",
+        plot_bgcolor="#0F172A",
+        font={"color": "#F8FAFC"},
+        legend={"bgcolor": "rgba(17,24,39,0.85)", "bordercolor": "#263245", "borderwidth": 1},
+        title_font={"color": "#F8FAFC"},
+    )
+    fig.update_xaxes(gridcolor="#263245", zerolinecolor="#334155", color="#DDE7F3")
+    fig.update_yaxes(gridcolor="#263245", zerolinecolor="#334155", color="#DDE7F3")
     return fig
 
 
@@ -804,6 +819,19 @@ def step_header(number, title, help_text):
     )
 
 
+def go_to_step(step):
+    st.session_state.current_step = step
+    st.rerun()
+
+
+def step_nav(back_step=None, next_step=None, next_label="下一步"):
+    cols = st.columns([1, 1, 4])
+    if back_step is not None and cols[0].button("上一步", use_container_width=True):
+        go_to_step(back_step)
+    if next_step is not None and cols[1].button(next_label, use_container_width=True):
+        go_to_step(next_step)
+
+
 st.title("自訂統計資料整理")
 st.caption("多檔 Excel 匯入、進階分類/檢查項目篩選、結果清單、統計與圖表匯出")
 st.markdown(
@@ -818,13 +846,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with st.container(border=True):
-    step_header(1, "上傳資料", "先選擇一份或多份 ISO Excel，按下開始整理後，系統會只保留可計算的數值檢查結果。")
-    uploaded_files = st.file_uploader(
-        "選擇一份或多份 ISO 報表 Excel",
-        type=["xlsx"],
-        accept_multiple_files=True,
-    )
+if "current_step" not in st.session_state:
+    st.session_state.current_step = 1
+
+uploaded_files = None
+if st.session_state.current_step == 1:
+    with st.container(border=True):
+        step_header(1, "上傳資料", "先選擇一份或多份 ISO Excel，按下開始整理後，系統會只保留可計算的數值檢查結果。")
+        uploaded_files = st.file_uploader(
+            "選擇一份或多份 ISO 報表 Excel",
+            type=["xlsx"],
+            accept_multiple_files=True,
+        )
 
 if "all_data" not in st.session_state:
     st.session_state.all_data = pd.DataFrame()
@@ -832,6 +865,8 @@ if "saved_settings" not in st.session_state:
     st.session_state.saved_settings = {}
 if "filter_profiles" not in st.session_state:
     st.session_state.filter_profiles = {}
+if "current_step" not in st.session_state:
+    st.session_state.current_step = 1
 
 if uploaded_files and st.button("開始整理", use_container_width=True):
     start_time = time.time()
@@ -850,6 +885,7 @@ if uploaded_files and st.button("開始整理", use_container_width=True):
 
     st.session_state.all_data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     st.session_state.process_msg = f"已整理 {len(frames)} 份檔案，共 {len(st.session_state.all_data)} 筆明細，耗時 {time.time() - start_time:.1f} 秒"
+    st.session_state.current_step = 2
     st.rerun()
 
 
@@ -860,28 +896,47 @@ if all_data.empty:
 
 st.success(st.session_state.get("process_msg", "資料已整理完成。"))
 
-with st.sidebar:
-    step_header(2, "篩選資料", "從分類、檢查項目或關鍵字縮小範圍；不輸入就代表全部。")
+if st.session_state.current_step == 1:
+    step_nav(next_step=2, next_label="下一步：篩選資料")
+    st.stop()
 
-    category1_options = sorted(v for v in all_data["進階分類1"].dropna().astype(str).unique() if v.strip())
-    selected_category1 = st.multiselect("進階分類1", category1_options, default=valid_default_list("selected_category1", category1_options))
-    category1_keyword = st.text_input("進階分類1關鍵字", value=setting_value("category1_keyword", ""))
+selected_category1 = st.session_state.get("selected_category1", [])
+category1_keyword = st.session_state.get("category1_keyword", "")
+selected_category2 = st.session_state.get("selected_category2", [])
+category2_keyword = st.session_state.get("category2_keyword", "")
+selected_items = st.session_state.get("selected_items", [])
+item_keyword = st.session_state.get("item_keyword", "")
 
-    category2_source = all_data
-    if selected_category1:
-        category2_source = category2_source[category2_source["進階分類1"].isin(selected_category1)]
-    category2_options = sorted(v for v in category2_source["進階分類2"].dropna().astype(str).unique() if v.strip())
-    selected_category2 = st.multiselect("進階分類2", category2_options, default=valid_default_list("selected_category2", category2_options))
-    category2_keyword = st.text_input("進階分類2關鍵字", value=setting_value("category2_keyword", ""))
+if st.session_state.current_step == 2:
+    with st.container(border=True):
+        step_header(2, "篩選資料", "從分類、檢查項目或關鍵字縮小範圍；不輸入就代表全部。設定好後按下一步查看清單。")
 
-    item_options_source = all_data
-    if selected_category1:
-        item_options_source = item_options_source[item_options_source["進階分類1"].isin(selected_category1)]
-    if selected_category2:
-        item_options_source = item_options_source[item_options_source["進階分類2"].isin(selected_category2)]
-    item_options = sorted(v for v in item_options_source["檢查項目"].dropna().astype(str).unique() if v.strip())
-    selected_items = st.multiselect("檢查項目", item_options, default=valid_default_list("selected_items", item_options))
-    item_keyword = st.text_input("檢查項目關鍵字", value=setting_value("item_keyword", ""))
+        category1_options = sorted(v for v in all_data["進階分類1"].dropna().astype(str).unique() if v.strip())
+        selected_category1 = st.multiselect("進階分類1", category1_options, default=[v for v in selected_category1 if v in category1_options])
+        category1_keyword = st.text_input("進階分類1關鍵字", value=category1_keyword)
+
+        category2_source = all_data
+        if selected_category1:
+            category2_source = category2_source[category2_source["進階分類1"].isin(selected_category1)]
+        category2_options = sorted(v for v in category2_source["進階分類2"].dropna().astype(str).unique() if v.strip())
+        selected_category2 = st.multiselect("進階分類2", category2_options, default=[v for v in selected_category2 if v in category2_options])
+        category2_keyword = st.text_input("進階分類2關鍵字", value=category2_keyword)
+
+        item_options_source = all_data
+        if selected_category1:
+            item_options_source = item_options_source[item_options_source["進階分類1"].isin(selected_category1)]
+        if selected_category2:
+            item_options_source = item_options_source[item_options_source["進階分類2"].isin(selected_category2)]
+        item_options = sorted(v for v in item_options_source["檢查項目"].dropna().astype(str).unique() if v.strip())
+        selected_items = st.multiselect("檢查項目", item_options, default=[v for v in selected_items if v in item_options])
+        item_keyword = st.text_input("檢查項目關鍵字", value=item_keyword)
+
+        st.session_state.selected_category1 = selected_category1
+        st.session_state.category1_keyword = category1_keyword
+        st.session_state.selected_category2 = selected_category2
+        st.session_state.category2_keyword = category2_keyword
+        st.session_state.selected_items = selected_items
+        st.session_state.item_keyword = item_keyword
 
 filtered = all_data.copy()
 if selected_category1:
@@ -895,31 +950,36 @@ filtered = apply_keyword_filter(filtered, "進階分類1", category1_keyword)
 filtered = apply_keyword_filter(filtered, "進階分類2", category2_keyword)
 filtered = apply_keyword_filter(filtered, "檢查項目", item_keyword)
 
+display_cols = [
+    "來源檔案",
+    "工單編號",
+    "車號/最小成本",
+    "檢查結束日期",
+    "進階分類1",
+    "進階分類2",
+    "檢查項目",
+    "檢查結果數值",
+    "單位",
+]
+
 st.metric("搜尋結果工單數", f"{filtered['工單編號'].nunique():,}")
 
-tab_list, tab_stats, tab_chart = st.tabs(["結果清單", "統計", "圖表"])
+if st.session_state.current_step == 2:
+    step_nav(back_step=1, next_step=3, next_label="下一步：確認清單")
+    st.stop()
 
-with tab_list:
+if st.session_state.current_step == 3:
     step_header(3, "確認結果清單", "這裡顯示目前篩選後的明細資料，可先確認資料是否符合預期。")
-    display_cols = [
-        "來源檔案",
-        "工單編號",
-        "車號/最小成本",
-        "檢查結束日期",
-        "進階分類1",
-        "進階分類2",
-        "檢查項目",
-        "檢查結果數值",
-        "單位",
-    ]
     display_df = compact_repeated_values(
         filtered[display_cols],
         ["來源檔案", "工單編號", "車號/最小成本", "檢查結束日期"],
     ).rename(columns={"檢查結果數值": "檢查結果"})
     display_df = format_numeric_columns(display_df)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
+    step_nav(back_step=2, next_step=4, next_label="下一步：設定統計")
+    st.stop()
 
-with tab_stats:
+if st.session_state.current_step == 4:
     step_header(4, "設定統計範圍", "先決定要統計哪些車號、哪些檢查項目，以及資料要依什麼欄位分組。未選車號或檢查項目時，系統會自動視為全選。")
 
     with st.container(border=True):
@@ -1033,9 +1093,28 @@ with tab_stats:
         stat_summary_cols[2].metric("高於上限", f"{(stats_df['判定'] == '高於上限').sum():,}" if "判定" in stats_df else "0")
         stat_summary_cols[3].metric("統計方式", compare_metric or "未指定")
 
-    st.dataframe(format_numeric_columns(stats_df), use_container_width=True, hide_index=True)
+    st.session_state.stats_df = stats_df
+    st.session_state.stats_source = stats_source
+    st.session_state.range_mode_value = range_mode
+    st.session_state.lower_value = lower_value
+    st.session_state.upper_value = upper_value
+    st.session_state.traffic_ranges = traffic_ranges
 
-with tab_chart:
+    st.dataframe(format_numeric_columns(stats_df), use_container_width=True, hide_index=True)
+    step_nav(back_step=3, next_step=5, next_label="下一步：產生圖表")
+    st.stop()
+
+if st.session_state.current_step == 5:
+    stats_df = st.session_state.get("stats_df", pd.DataFrame())
+    stats_source = st.session_state.get("stats_source", filtered.copy())
+    range_mode = st.session_state.get("range_mode_value", "不判定")
+    lower_value = st.session_state.get("lower_value", None)
+    upper_value = st.session_state.get("upper_value", None)
+    traffic_ranges = st.session_state.get("traffic_ranges", None)
+    if stats_df.empty:
+        st.warning("尚未建立統計結果，請先回到上一步完成統計設定。")
+        step_nav(back_step=4, next_label=None)
+        st.stop()
     step_header(5, "產生圖表", "選資料來源與欄位後產生圖表；長條圖和折線圖會保留上下限或紅黃綠燈門檻線，並顯示圖例。")
     chart_data_mode = st.radio("圖表資料來源", ["統計結果", "篩選明細"], horizontal=True, index=valid_index("chart_data_mode_index", ["統計結果", "篩選明細"]))
     chart_source = stats_df if chart_data_mode == "統計結果" else stats_source
@@ -1192,6 +1271,8 @@ with tab_chart:
                 )
             except Exception:
                 pass
+
+    step_nav(back_step=4)
 
 export_name = f"行動檢修平台整理_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 export_display = compact_repeated_values(
