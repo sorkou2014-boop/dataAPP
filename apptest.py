@@ -16,50 +16,133 @@ st.set_page_config(page_title="自訂統計資料整理", layout="wide")
 st.markdown(
     """
     <style>
+    :root {
+        --app-bg: #F6F8FB;
+        --panel-bg: #FFFFFF;
+        --panel-soft: #F9FAFB;
+        --text-main: #172033;
+        --text-muted: #5F6B7A;
+        --line: #DDE3EA;
+        --primary: #2563EB;
+        --primary-soft: #EAF1FF;
+        --accent: #0F766E;
+        --accent-soft: #E8F6F3;
+        --warning-soft: #FFF7E6;
+    }
     .main .block-container {
         max-width: 1480px;
-        padding-top: 1.4rem;
+        padding-top: 1.6rem;
         padding-bottom: 2rem;
     }
-    .stApp, body {
-        background: #FFFFFF;
+    .stApp {
+        background:
+            linear-gradient(180deg, #FFFFFF 0%, var(--app-bg) 260px, var(--app-bg) 100%);
+        color: var(--text-main);
+    }
+    html, body, [class*="css"] {
+        color: var(--text-main);
     }
     h1, h2, h3 {
         letter-spacing: 0;
+        color: var(--text-main);
+    }
+    h1 {
+        font-weight: 850;
+        margin-bottom: 0.2rem;
+    }
+    p, label, span, div {
+        color: inherit;
+    }
+    [data-testid="stMarkdownContainer"] p {
+        color: var(--text-muted);
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: var(--panel-bg);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(23, 32, 51, 0.06);
     }
     div[data-testid="stMetric"] {
-        border: 1px solid #E5E7EB;
-        border-radius: 8px;
-        padding: 12px 14px;
-        background: #FFFFFF;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px 16px;
+        background: var(--panel-bg);
+        box-shadow: 0 4px 14px rgba(23, 32, 51, 0.05);
+    }
+    div[data-testid="stMetric"] label,
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: var(--text-main);
     }
     div[data-testid="stTabs"] button {
         font-weight: 700;
+        color: var(--text-main);
+    }
+    div[data-testid="stTabs"] button[aria-selected="true"] {
+        color: var(--primary);
+        border-bottom-color: var(--primary);
     }
     section[data-testid="stSidebar"] {
-        border-right: 1px solid #E5E7EB;
+        border-right: 1px solid var(--line);
+        background: #FBFCFE;
+    }
+    section[data-testid="stSidebar"] * {
+        color: var(--text-main);
+    }
+    .stTextInput input,
+    .stNumberInput input,
+    .stSelectbox div[data-baseweb="select"],
+    .stMultiSelect div[data-baseweb="select"] {
         background: #FFFFFF;
+        color: var(--text-main);
+        border-color: var(--line);
+    }
+    .stButton > button,
+    .stDownloadButton > button {
+        border-radius: 9px;
+        font-weight: 750;
+        border: 1px solid var(--primary);
+        background: var(--primary);
+        color: #FFFFFF;
+    }
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        border-color: #1D4ED8;
+        background: #1D4ED8;
+        color: #FFFFFF;
+    }
+    div[role="radiogroup"] label {
+        background: #FFFFFF;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 10px;
+        margin-right: 6px;
+    }
+    div[role="radiogroup"] label:has(input:checked) {
+        background: var(--primary-soft);
+        border-color: var(--primary);
+        color: var(--primary);
     }
     .workflow {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 12px;
-        margin: 12px 0 18px 0;
+        gap: 14px;
+        margin: 16px 0 20px 0;
     }
     .workflow-step {
-        border: 1px solid #E5E7EB;
-        border-radius: 8px;
-        padding: 12px 14px;
-        background: #FAFAFA;
-        min-height: 82px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px 16px;
+        background: var(--panel-bg);
+        min-height: 94px;
+        box-shadow: 0 8px 24px rgba(23, 32, 51, 0.06);
     }
     .workflow-step strong {
         display: block;
-        color: #111827;
+        color: var(--text-main);
         margin-bottom: 4px;
     }
     .workflow-step span {
-        color: #4B5563;
+        color: var(--text-muted);
         font-size: 0.92rem;
     }
     .step-title {
@@ -69,7 +152,7 @@ st.markdown(
         margin-bottom: 6px;
         font-size: 1.05rem;
         font-weight: 800;
-        color: #111827;
+        color: var(--text-main);
     }
     .step-badge {
         display: inline-flex;
@@ -78,20 +161,28 @@ st.markdown(
         width: 26px;
         height: 26px;
         border-radius: 999px;
-        background: #2563EB;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
         color: #FFFFFF;
         font-size: 0.9rem;
         font-weight: 800;
     }
     .step-help {
-        color: #6B7280;
+        color: var(--text-muted);
         font-size: 0.92rem;
         margin: 0 0 12px 0;
     }
     .soft-divider {
         height: 1px;
-        background: #E5E7EB;
+        background: var(--line);
         margin: 12px 0;
+    }
+    .stAlert {
+        border-radius: 10px;
+    }
+    div[data-testid="stDataFrame"] {
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid var(--line);
     }
     @media (max-width: 900px) {
         .workflow {
