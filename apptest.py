@@ -11,7 +11,7 @@ import plotly.express as px
 import streamlit as st
 
 
-st.set_page_config(page_title="自訂統計資料整理", layout="wide")
+st.set_page_config(page_title="檢修資料圖表整理工具", layout="wide")
 
 st.markdown(
     """
@@ -109,11 +109,20 @@ st.markdown(
         background: var(--primary);
         color: #FFFFFF;
     }
+    .stButton > button *,
+    .stDownloadButton > button * {
+        color: #FFFFFF !important;
+        font-weight: 800;
+    }
     .stButton > button:hover,
     .stDownloadButton > button:hover {
         border-color: #1D4ED8;
         background: #1D4ED8;
         color: #FFFFFF;
+    }
+    .stButton > button:hover *,
+    .stDownloadButton > button:hover * {
+        color: #FFFFFF !important;
     }
     div[role="radiogroup"] label {
         background: #0F172A;
@@ -644,6 +653,8 @@ def make_chart(
     show_data_labels=False,
     y_tick_interval=None,
     limit_lines=None,
+    legend_title=None,
+    legend_name_map=None,
 ):
     if df.empty:
         return None
@@ -658,17 +669,29 @@ def make_chart(
     if chart_df.empty:
         return None
 
-    chart_df = chart_df.sort_values(by=[series_col, x_col] if series_col and series_col in chart_df.columns else x_col)
+    chart_df["_x_order"] = range(len(chart_df))
+    x_order = chart_df[x_col].astype(str).drop_duplicates().tolist()
+    legend_name_map = legend_name_map or {}
+    color_source_col = None
+    color_display_col = None
+
+    chart_df = chart_df.sort_values(by=[series_col, "_x_order"] if series_col and series_col in chart_df.columns else "_x_order")
     title = title or f"{x_col} / {y_col}"
     if chart_type == "折線圖":
+        if series_col and series_col in chart_df.columns:
+            color_source_col = series_col
+            color_display_col = "_legend_name"
+            chart_df[color_display_col] = chart_df[series_col].map(legend_name_map).fillna(chart_df[series_col].astype(str))
+            series_color_map = {legend_name_map.get(key, key): value for key, value in (series_colors or {}).items()}
         fig = px.line(
             chart_df,
             x=x_col,
             y=y_col,
-            color=series_col if series_col in chart_df.columns else None,
-            color_discrete_map=series_colors or None,
+            color=color_display_col if color_display_col else None,
+            color_discrete_map=series_color_map if color_display_col else None,
             markers=True,
             title=title,
+            category_orders={x_col: x_order},
         )
     elif chart_type == "圓餅圖":
         fig = px.pie(chart_df, names=x_col, values=y_col, title=title)
@@ -684,11 +707,15 @@ def make_chart(
         color_col = None
         color_map = None
         if traffic_color_enabled and "判定" in chart_df.columns:
-            color_col = "判定"
-            color_map = traffic_colors or None
+            color_source_col = "判定"
+            color_col = "_legend_name"
+            chart_df[color_col] = chart_df["判定"].map(legend_name_map).fillna(chart_df["判定"].astype(str))
+            color_map = {legend_name_map.get(key, key): value for key, value in (traffic_colors or {}).items()}
         elif series_col and series_col in chart_df.columns:
-            color_col = series_col
-            color_map = series_colors or None
+            color_source_col = series_col
+            color_col = "_legend_name"
+            chart_df[color_col] = chart_df[series_col].map(legend_name_map).fillna(chart_df[series_col].astype(str))
+            color_map = {legend_name_map.get(key, key): value for key, value in (series_colors or {}).items()}
         fig = px.bar(
             chart_df,
             x=x_col,
@@ -697,6 +724,7 @@ def make_chart(
             color_discrete_map=color_map,
             title=title,
             barmode="group",
+            category_orders={x_col: x_order},
         )
         if not color_col and bar_color:
             fig.update_traces(marker_color=bar_color)
@@ -731,10 +759,11 @@ def make_chart(
             fig.update_yaxes(title_text=y_label)
         if show_data_labels:
             if chart_type == "折線圖":
-                fig.update_traces(mode="lines+markers+text", texttemplate="%{y:g}", textposition="top center")
+                fig.update_traces(mode="lines+markers+text", texttemplate="%{y:~g}", textposition="top center")
             else:
-                fig.update_traces(texttemplate="%{y:g}", textposition="outside")
-        fig.update_layout(showlegend=True, legend_title_text=series_col or ("判定" if traffic_color_enabled else "圖例"))
+                fig.update_traces(texttemplate="%{y:~g}", textposition="outside")
+        fig.update_traces(hovertemplate=f"%{{x}}<br>{y_col}: %{{y:~g}}<extra></extra>")
+        fig.update_layout(showlegend=True, legend_title_text=legend_title or color_source_col or ("判定" if traffic_color_enabled else "圖例"))
     elif show_data_labels and chart_type == "圓餅圖":
         fig.update_traces(textposition="inside")
     fig.update_layout(
@@ -746,16 +775,18 @@ def make_chart(
         title_font={"color": "#F8FAFC"},
     )
     fig.update_xaxes(gridcolor="#263245", zerolinecolor="#334155", color="#DDE7F3")
-    fig.update_yaxes(gridcolor="#263245", zerolinecolor="#334155", color="#DDE7F3")
+    fig.update_yaxes(gridcolor="#263245", zerolinecolor="#334155", color="#DDE7F3", tickformat="~g")
     return fig
 
 
-def build_limit_lines(range_mode, lower_value=None, upper_value=None, traffic_ranges=None):
+def build_limit_lines(range_mode, lower_value=None, upper_value=None, traffic_ranges=None, show_lower=True, show_upper=True):
     if range_mode == "上下限":
-        return [
-            {"value": lower_value, "label": "下限", "color": "#EF4444"},
-            {"value": upper_value, "label": "上限", "color": "#10B981"},
-        ]
+        lines = []
+        if show_lower:
+            lines.append({"value": lower_value, "label": f"下限 {format_number(lower_value)}", "color": "#EF4444"})
+        if show_upper:
+            lines.append({"value": upper_value, "label": f"上限 {format_number(upper_value)}", "color": "#10B981"})
+        return lines
 
     if range_mode == "紅黃綠燈" and traffic_ranges:
         lines = []
@@ -763,7 +794,12 @@ def build_limit_lines(range_mode, lower_value=None, upper_value=None, traffic_ra
         seen = set()
         for name in ["紅燈", "黃燈", "綠燈"]:
             lower, upper = traffic_ranges.get(name, (None, None))
-            for label, value in [(f"{name}下限", lower), (f"{name}上限", upper)]:
+            candidates = []
+            if show_lower:
+                candidates.append((f"{name}下限 {format_number(lower)}", lower))
+            if show_upper:
+                candidates.append((f"{name}上限 {format_number(upper)}", upper))
+            for label, value in candidates:
                 if value is None or value in seen:
                     continue
                 seen.add(value)
@@ -832,7 +868,7 @@ def step_nav(back_step=None, next_step=None, next_label="下一步"):
         go_to_step(next_step)
 
 
-st.title("自訂統計資料整理")
+st.title("檢修資料圖表整理工具")
 st.caption("多檔 Excel 匯入、進階分類/檢查項目篩選、結果清單、統計與圖表匯出")
 st.markdown(
     """
@@ -1145,6 +1181,7 @@ if st.session_state.current_step == 5:
             chart_title = label_cols[0].text_input("圖表標題", value=setting_value("chart_title", ""))
             x_axis_label = label_cols[1].text_input("X 軸名稱", value=setting_value("x_axis_label", x_col))
             y_axis_label = label_cols[2].text_input("Y 軸名稱", value=setting_value("y_axis_label", y_mode))
+            legend_title = st.text_input("圖例標題", value=setting_value("legend_title", series_col or ("判定" if range_mode == "紅黃綠燈" else "圖例")))
 
             pie_label_modes = ["標籤+百分比", "標籤+數值", "百分比", "數值", "全部"]
             pie_label_mode = "標籤+百分比"
@@ -1168,8 +1205,13 @@ if st.session_state.current_step == 5:
                     step=0.1,
                     help="例如 1~7 每格 0.5，就輸入 0.5。填 0 代表自動。",
                 )
+                line_cols = st.columns(2)
+                show_lower_line = line_cols[0].checkbox("顯示下限線", value=setting_value("show_lower_line", True))
+                show_upper_line = line_cols[1].checkbox("顯示上限線", value=setting_value("show_upper_line", True))
         else:
             y_tick_interval = None
+            show_lower_line = False
+            show_upper_line = False
 
         show_data_labels = st.checkbox("顯示資料標籤", value=setting_value("show_data_labels", False))
 
@@ -1200,21 +1242,35 @@ if st.session_state.current_step == 5:
             "紅燈": red_color,
             "未分類": "#94A3B8",
         }
+        legend_name_map = {}
+        if traffic_color_enabled:
+            with st.container(border=True):
+                st.markdown("##### 燈號圖例名稱")
+                legend_cols = st.columns(4)
+                legend_name_map["綠燈"] = legend_cols[0].text_input("綠燈名稱", value=setting_value("legend_green_name", "綠燈"))
+                legend_name_map["黃燈"] = legend_cols[1].text_input("黃燈名稱", value=setting_value("legend_yellow_name", "黃燈"))
+                legend_name_map["紅燈"] = legend_cols[2].text_input("紅燈名稱", value=setting_value("legend_red_name", "紅燈"))
+                legend_name_map["未分類"] = legend_cols[3].text_input("未分類名稱", value=setting_value("legend_unknown_name", "未分類"))
         series_colors = {}
         if series_col:
             with st.container(border=True):
-                st.markdown("##### 系列顏色")
+                st.markdown("##### 系列顏色與圖例名稱")
                 series_values = [value for value in chart_source[series_col].dropna().astype(str).unique().tolist() if value]
                 default_palette = ["#2563EB", "#EF4444", "#10B981", "#F59E0B", "#8B5CF6", "#06B6D4", "#64748B", "#EC4899"]
-                color_columns = st.columns(min(4, max(1, len(series_values))))
                 for idx, series_value in enumerate(series_values):
                     key = f"series_color_{series_col}_{series_value}"
-                    series_colors[series_value] = color_columns[idx % len(color_columns)].color_picker(
-                        series_value,
+                    name_key = f"series_name_{series_col}_{series_value}"
+                    row_cols = st.columns([2, 1])
+                    legend_name_map[series_value] = row_cols[0].text_input(
+                        f"{series_value} 圖例名稱",
+                        value=setting_value(name_key, series_value),
+                    )
+                    series_colors[series_value] = row_cols[1].color_picker(
+                        f"{series_value} 顏色",
                         value=setting_value(key, default_palette[idx % len(default_palette)]),
                     )
 
-        limit_lines = build_limit_lines(range_mode, lower_value, upper_value, traffic_ranges)
+        limit_lines = build_limit_lines(range_mode, lower_value, upper_value, traffic_ranges, show_lower_line, show_upper_line)
 
         fig = make_chart(
             chart_source,
@@ -1237,6 +1293,8 @@ if st.session_state.current_step == 5:
             show_data_labels,
             y_tick_interval if y_tick_interval and y_tick_interval > 0 else None,
             limit_lines,
+            legend_title,
+            legend_name_map,
         )
         if fig is None:
             st.info("目前篩選結果沒有可繪圖的資料。")
