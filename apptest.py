@@ -13,6 +13,96 @@ import streamlit as st
 
 st.set_page_config(page_title="自訂統計資料整理", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    .main .block-container {
+        max-width: 1480px;
+        padding-top: 1.4rem;
+        padding-bottom: 2rem;
+    }
+    .stApp, body {
+        background: #FFFFFF;
+    }
+    h1, h2, h3 {
+        letter-spacing: 0;
+    }
+    div[data-testid="stMetric"] {
+        border: 1px solid #E5E7EB;
+        border-radius: 8px;
+        padding: 12px 14px;
+        background: #FFFFFF;
+    }
+    div[data-testid="stTabs"] button {
+        font-weight: 700;
+    }
+    section[data-testid="stSidebar"] {
+        border-right: 1px solid #E5E7EB;
+        background: #FFFFFF;
+    }
+    .workflow {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin: 12px 0 18px 0;
+    }
+    .workflow-step {
+        border: 1px solid #E5E7EB;
+        border-radius: 8px;
+        padding: 12px 14px;
+        background: #FAFAFA;
+        min-height: 82px;
+    }
+    .workflow-step strong {
+        display: block;
+        color: #111827;
+        margin-bottom: 4px;
+    }
+    .workflow-step span {
+        color: #4B5563;
+        font-size: 0.92rem;
+    }
+    .step-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+        font-size: 1.05rem;
+        font-weight: 800;
+        color: #111827;
+    }
+    .step-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 999px;
+        background: #2563EB;
+        color: #FFFFFF;
+        font-size: 0.9rem;
+        font-weight: 800;
+    }
+    .step-help {
+        color: #6B7280;
+        font-size: 0.92rem;
+        margin: 0 0 12px 0;
+    }
+    .soft-divider {
+        height: 1px;
+        background: #E5E7EB;
+        margin: 12px 0;
+    }
+    @media (max-width: 900px) {
+        .workflow {
+            grid-template-columns: 1fr;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 META_LABELS = {
     "工單編號": ["工單編號", "工單號碼"],
@@ -158,6 +248,26 @@ def normalize_date(value):
         return pd.to_datetime(value).strftime("%Y-%m-%d")
     except Exception:
         return normalize_text(value)
+
+
+def format_number(value):
+    if pd.isna(value):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.10f}".rstrip("0").rstrip(".")
+
+
+def format_numeric_columns(df):
+    display_df = df.copy()
+    numeric_cols = display_df.select_dtypes(include="number").columns
+    for col in numeric_cols:
+        display_df[col] = display_df[col].apply(format_number)
+    return display_df
 
 
 def extract_numeric(value):
@@ -436,6 +546,7 @@ def make_chart(
     series_colors=None,
     show_data_labels=False,
     y_tick_interval=None,
+    limit_lines=None,
 ):
     if df.empty:
         return None
@@ -473,26 +584,42 @@ def make_chart(
         }
         fig.update_traces(textinfo=textinfo_map.get(pie_label_mode, "label+percent"))
     else:
+        color_col = None
+        color_map = None
+        if traffic_color_enabled and "判定" in chart_df.columns:
+            color_col = "判定"
+            color_map = traffic_colors or None
+        elif series_col and series_col in chart_df.columns:
+            color_col = series_col
+            color_map = series_colors or None
         fig = px.bar(
             chart_df,
             x=x_col,
             y=y_col,
-            color=series_col if series_col in chart_df.columns and not traffic_color_enabled else None,
-            color_discrete_map=series_colors or None,
+            color=color_col,
+            color_discrete_map=color_map,
             title=title,
             barmode="group",
         )
-        if traffic_color_enabled and "判定" in chart_df.columns:
-            colors = traffic_colors or {}
-            fig.update_traces(marker_color=[colors.get(value, bar_color) for value in chart_df["判定"]])
-        elif bar_color:
+        if not color_col and bar_color:
             fig.update_traces(marker_color=bar_color)
 
     if chart_type != "圓餅圖":
-        if lower_limit is not None:
-            fig.add_hline(y=lower_limit, line_dash="dash", line_color="red", annotation_text="下限")
-        if upper_limit is not None:
-            fig.add_hline(y=upper_limit, line_dash="dash", line_color="green", annotation_text="上限")
+        lines = limit_lines or []
+        if not lines:
+            if lower_limit is not None:
+                lines.append({"value": lower_limit, "label": "下限", "color": "#EF4444"})
+            if upper_limit is not None:
+                lines.append({"value": upper_limit, "label": "上限", "color": "#10B981"})
+        for line in lines:
+            if line.get("value") is not None:
+                fig.add_hline(
+                    y=line["value"],
+                    line_dash="dash",
+                    line_color=line.get("color", "#64748B"),
+                    annotation_text=line.get("label", ""),
+                    annotation_position="top left",
+                )
         if y_min is not None and y_max is not None and y_min >= y_max:
             y_min = None
             y_max = None
@@ -510,9 +637,34 @@ def make_chart(
                 fig.update_traces(mode="lines+markers+text", texttemplate="%{y:g}", textposition="top center")
             else:
                 fig.update_traces(texttemplate="%{y:g}", textposition="outside")
+        fig.update_layout(showlegend=True, legend_title_text=series_col or ("判定" if traffic_color_enabled else "圖例"))
     elif show_data_labels and chart_type == "圓餅圖":
         fig.update_traces(textposition="inside")
+    fig.update_layout(showlegend=True, paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF")
     return fig
+
+
+def build_limit_lines(range_mode, lower_value=None, upper_value=None, traffic_ranges=None):
+    if range_mode == "上下限":
+        return [
+            {"value": lower_value, "label": "下限", "color": "#EF4444"},
+            {"value": upper_value, "label": "上限", "color": "#10B981"},
+        ]
+
+    if range_mode == "紅黃綠燈" and traffic_ranges:
+        lines = []
+        color_map = {"紅燈": "#EF4444", "黃燈": "#F59E0B", "綠燈": "#10B981"}
+        seen = set()
+        for name in ["紅燈", "黃燈", "綠燈"]:
+            lower, upper = traffic_ranges.get(name, (None, None))
+            for label, value in [(f"{name}下限", lower), (f"{name}上限", upper)]:
+                if value is None or value in seen:
+                    continue
+                seen.add(value)
+                lines.append({"value": value, "label": label, "color": color_map[name]})
+        return sorted(lines, key=lambda item: item["value"])
+
+    return []
 
 
 def setting_value(key, default):
@@ -551,14 +703,37 @@ def update_saved_settings(**kwargs):
     st.session_state.saved_settings = settings
 
 
+def step_header(number, title, help_text):
+    st.markdown(
+        f"""
+        <div class="step-title"><span class="step-badge">{number}</span><span>{title}</span></div>
+        <p class="step-help">{help_text}</p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 st.title("自訂統計資料整理")
 st.caption("多檔 Excel 匯入、進階分類/檢查項目篩選、結果清單、統計與圖表匯出")
-
-uploaded_files = st.file_uploader(
-    "選擇一份或多份 ISO 報表 Excel",
-    type=["xlsx"],
-    accept_multiple_files=True,
+st.markdown(
+    """
+    <div class="workflow">
+      <div class="workflow-step"><strong>1. 上傳資料</strong><span>一次選多份 ISO Excel，系統自動整理成數值明細。</span></div>
+      <div class="workflow-step"><strong>2. 篩選項目</strong><span>用分類、檢查項目或關鍵字縮小資料範圍。</span></div>
+      <div class="workflow-step"><strong>3. 設定統計</strong><span>選最小值、最大值、平均值、原始值或四則運算。</span></div>
+      <div class="workflow-step"><strong>4. 產生圖表</strong><span>做長條圖、折線圖或圓餅圖，並匯出結果。</span></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
+
+with st.container(border=True):
+    step_header(1, "上傳資料", "先選擇一份或多份 ISO Excel，按下開始整理後，系統會只保留可計算的數值檢查結果。")
+    uploaded_files = st.file_uploader(
+        "選擇一份或多份 ISO 報表 Excel",
+        type=["xlsx"],
+        accept_multiple_files=True,
+    )
 
 if "all_data" not in st.session_state:
     st.session_state.all_data = pd.DataFrame()
@@ -595,26 +770,7 @@ if all_data.empty:
 st.success(st.session_state.get("process_msg", "資料已整理完成。"))
 
 with st.sidebar:
-    st.header("1. 篩選資料")
-
-    settings_file = st.file_uploader("匯入篩選設定檔", type=["json"], accept_multiple_files=False)
-    if settings_file is not None and st.button("套用設定檔", use_container_width=True):
-        try:
-            loaded_settings = json.loads(settings_file.getvalue().decode("utf-8"))
-            if "profiles" in loaded_settings:
-                st.session_state.filter_profiles.update(loaded_settings["profiles"])
-            else:
-                st.session_state.saved_settings = loaded_settings
-            st.rerun()
-        except Exception as exc:
-            st.warning(f"設定檔讀取失敗：{exc}")
-
-    profile_names = sorted(st.session_state.filter_profiles.keys())
-    if profile_names:
-        selected_profile = st.selectbox("套用已儲存篩選", [""] + profile_names)
-        if selected_profile and st.button("套用選取篩選", use_container_width=True):
-            st.session_state.saved_settings = st.session_state.filter_profiles[selected_profile].copy()
-            st.rerun()
+    step_header(2, "篩選資料", "從分類、檢查項目或關鍵字縮小範圍；不輸入就代表全部。")
 
     category1_options = sorted(v for v in all_data["進階分類1"].dropna().astype(str).unique() if v.strip())
     selected_category1 = st.multiselect("進階分類1", category1_options, default=valid_default_list("selected_category1", category1_options))
@@ -636,14 +792,6 @@ with st.sidebar:
     selected_items = st.multiselect("檢查項目", item_options, default=valid_default_list("selected_items", item_options))
     item_keyword = st.text_input("檢查項目關鍵字", value=setting_value("item_keyword", ""))
 
-    st.download_button(
-        "下載全部篩選設定",
-        data=json.dumps({"profiles": st.session_state.filter_profiles}, ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="行動檢修平台篩選設定.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-
 filtered = all_data.copy()
 if selected_category1:
     filtered = filtered[filtered["進階分類1"].isin(selected_category1)]
@@ -661,6 +809,7 @@ st.metric("搜尋結果工單數", f"{filtered['工單編號'].nunique():,}")
 tab_list, tab_stats, tab_chart = st.tabs(["結果清單", "統計", "圖表"])
 
 with tab_list:
+    step_header(3, "確認結果清單", "這裡顯示目前篩選後的明細資料，可先確認資料是否符合預期。")
     display_cols = [
         "來源檔案",
         "工單編號",
@@ -676,32 +825,38 @@ with tab_list:
         filtered[display_cols],
         ["來源檔案", "工單編號", "車號/最小成本", "檢查結束日期"],
     ).rename(columns={"檢查結果數值": "檢查結果"})
+    display_df = format_numeric_columns(display_df)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 with tab_stats:
-    st.subheader("2. 設定統計範圍")
-    st.caption("車號或檢查項目沒有勾選時，系統會自動視為全選。")
+    step_header(4, "設定統計範圍", "先決定要統計哪些車號、哪些檢查項目，以及資料要依什麼欄位分組。未選車號或檢查項目時，系統會自動視為全選。")
 
-    vehicle_options = sorted(v for v in filtered["車號/最小成本"].dropna().astype(str).unique() if v.strip())
-    stat_vehicle = st.multiselect("選擇要計算的車號/最小成本", vehicle_options, default=valid_default_list("stat_vehicle", vehicle_options))
+    with st.container(border=True):
+        st.markdown("##### 統計資料範圍")
+        vehicle_options = sorted(v for v in filtered["車號/最小成本"].dropna().astype(str).unique() if v.strip())
+        stat_vehicle = st.multiselect("選擇要計算的車號/最小成本", vehicle_options, default=valid_default_list("stat_vehicle", vehicle_options))
 
-    stat_item_keyword = st.text_input("統計檢查項目關鍵字", value=setting_value("stat_item_keyword", "直徑"))
-    stat_item_options = sorted(v for v in filtered["檢查項目"].dropna().astype(str).unique() if v.strip())
-    if stat_item_keyword:
-        stat_item_options = [item for item in stat_item_options if stat_item_keyword.lower() in item.lower()]
-    stat_items = st.multiselect("選擇要計算的檢查項目", stat_item_options, default=valid_default_list("stat_items", stat_item_options))
+        stat_item_keyword = st.text_input("統計檢查項目關鍵字", value=setting_value("stat_item_keyword", "直徑"), help="例如輸入「直徑」會只計算檢查項目名稱包含直徑的資料。")
+        stat_item_options = sorted(v for v in filtered["檢查項目"].dropna().astype(str).unique() if v.strip())
+        if stat_item_keyword:
+            stat_item_options = [item for item in stat_item_options if stat_item_keyword.lower() in item.lower()]
+        stat_items = st.multiselect("選擇要計算的檢查項目", stat_item_options, default=valid_default_list("stat_items", stat_item_options))
 
-    group_options = ["車號/最小成本", "檢查結束日期", "檢查項目", "進階分類1", "進階分類2"]
-    stat_group_cols = st.multiselect(
-        "統計分組欄位",
-        group_options,
-        default=valid_default_list("stat_group_cols", group_options) or ["車號/最小成本", "檢查項目"],
-    )
-    if len(stat_items) > 1 and "檢查項目" not in stat_group_cols:
-        st.info("已選多個檢查項目；若要在統計或折線圖中分列顯示，建議將「檢查項目」加入統計分組欄位。")
+        group_options = ["車號/最小成本", "檢查結束日期", "檢查項目", "進階分類1", "進階分類2"]
+        stat_group_cols = st.multiselect(
+            "統計分組欄位",
+            group_options,
+            default=valid_default_list("stat_group_cols", group_options) or ["車號/最小成本", "檢查項目"],
+            help="分組欄位決定統計表每一列代表什麼。例如車號 + 檢查項目，就是每台車每個檢查項目各算一列。",
+        )
+        if len(stat_items) > 1 and "檢查項目" not in stat_group_cols:
+            st.info("已選多個檢查項目；若要在統計或折線圖中分列顯示，建議將「檢查項目」加入統計分組欄位。")
 
-    compare_options = ["", "原始值", "最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]
-    compare_metric = st.selectbox("要拿來比較/畫圖的統計值", compare_options, index=valid_index("compare_metric_index", compare_options))
+    with st.container(border=True):
+        st.markdown("##### 統計方式")
+        compare_options = ["", "原始值", "最小值", "最大值", "平均值", "相加", "相減", "相乘", "相除"]
+        compare_metric = st.radio("要拿來比較/畫圖的統計值", compare_options, horizontal=True, index=valid_index("compare_metric_index", compare_options))
+        st.caption("常用：輪徑看最小值、溫度/電壓可看平均值；只有一筆資料時可選原始值。")
     operation_left = operation_right = None
     operation_value = None
     if compare_metric in ["相加", "相減", "相乘", "相除"]:
@@ -724,13 +879,14 @@ with tab_stats:
             disabled=operation_right != "自訂數值",
         )
 
-    st.subheader("3. 設定判定範圍")
-    range_mode = st.radio(
-        "統計判定方式",
-        ["不判定", "上下限", "紅黃綠燈"],
-        horizontal=True,
-        index=valid_index("range_mode_index", ["不判定", "上下限", "紅黃綠燈"]),
-    )
+    with st.container(border=True):
+        st.markdown("##### 判定範圍")
+        range_mode = st.radio(
+            "統計判定方式",
+            ["不判定", "上下限", "紅黃綠燈"],
+            horizontal=True,
+            index=valid_index("range_mode_index", ["不判定", "上下限", "紅黃綠燈"]),
+        )
 
     lower_limit = upper_limit = None
     traffic_ranges = None
@@ -786,32 +942,10 @@ with tab_stats:
         stat_summary_cols[2].metric("高於上限", f"{(stats_df['判定'] == '高於上限').sum():,}" if "判定" in stats_df else "0")
         stat_summary_cols[3].metric("統計方式", compare_metric or "未指定")
 
-    st.dataframe(stats_df, use_container_width=True, hide_index=True)
-
-    if st.button("保留統計設定", use_container_width=True):
-        update_saved_settings(
-            stat_vehicle=stat_vehicle,
-            stat_item_keyword=stat_item_keyword,
-            stat_items=stat_items,
-            stat_group_cols=stat_group_cols,
-            compare_metric_index=compare_options.index(compare_metric),
-            operation_left_index=["原始值", "最小值", "最大值", "平均值", "筆數"].index(operation_left) if operation_left else 0,
-            operation_right_index=(["原始值", "最小值", "最大值", "平均值", "筆數", "自訂數值"].index(operation_right) if operation_right else 0),
-            operation_value=operation_value if operation_value is not None else 1.0,
-            range_mode_index=["不判定", "上下限", "紅黃綠燈"].index(range_mode),
-            lower_limit=lower_limit if lower_limit is not None else 0.0,
-            upper_limit=upper_limit if upper_limit is not None else 0.0,
-            green_min=traffic_ranges["綠燈"][0] if traffic_ranges else 788.0,
-            green_max=traffic_ranges["綠燈"][1] if traffic_ranges else 850.0,
-            yellow_min=traffic_ranges["黃燈"][0] if traffic_ranges else 782.0,
-            yellow_max=traffic_ranges["黃燈"][1] if traffic_ranges else 787.0,
-            red_min=traffic_ranges["紅燈"][0] if traffic_ranges else 775.0,
-            red_max=traffic_ranges["紅燈"][1] if traffic_ranges else 781.0,
-        )
-        st.success("已保留統計設定。")
+    st.dataframe(format_numeric_columns(stats_df), use_container_width=True, hide_index=True)
 
 with tab_chart:
-    st.subheader("4. 製作圖表")
+    step_header(5, "產生圖表", "選資料來源與欄位後產生圖表；長條圖和折線圖會保留上下限或紅黃綠燈門檻線，並顯示圖例。")
     chart_data_mode = st.radio("圖表資料來源", ["統計結果", "篩選明細"], horizontal=True, index=valid_index("chart_data_mode_index", ["統計結果", "篩選明細"]))
     chart_source = stats_df if chart_data_mode == "統計結果" else stats_source
     chart_cols = [col for col in ["車號/最小成本", "檢查結束日期", "檢查項目", "進階分類1", "進階分類2"] if col in chart_source.columns]
@@ -825,65 +959,71 @@ with tab_chart:
     if not chart_cols or not y_modes or chart_source.empty:
         st.info("目前統計或篩選範圍沒有可繪圖的資料。")
     else:
-        st.markdown("##### 資料與欄位")
-        left, middle, right = st.columns(3)
-        chart_type = left.selectbox("圖表類型", chart_types, index=valid_index("chart_type_index", chart_types))
-        x_col = middle.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
-        y_mode = right.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
-        series_options = [""] + [col for col in ["檢查項目", "進階分類1", "進階分類2", "車號/最小成本"] if col in chart_source.columns and col != x_col]
-        series_col = st.selectbox("系列欄位（多條線/多組柱體）", series_options, index=valid_index("series_col_index", series_options))
+        with st.container(border=True):
+            st.markdown("##### 圖表資料與欄位")
+            chart_type = st.radio("圖表類型", chart_types, horizontal=True, index=valid_index("chart_type_index", chart_types))
+            left, middle, right = st.columns(3)
+            x_col = left.selectbox("X 軸 / 分類", chart_cols, index=valid_index("x_col_index", chart_cols))
+            y_mode = middle.selectbox("Y 軸 / 數值", y_modes, index=valid_index("y_mode_index", y_modes))
+            series_options = [""] + [col for col in ["檢查項目", "進階分類1", "進階分類2", "車號/最小成本"] if col in chart_source.columns and col != x_col]
+            series_col = right.selectbox("系列欄位（多條線/多組柱體）", series_options, index=valid_index("series_col_index", series_options))
+            st.caption("折線圖若要一次顯示多條線，請在系列欄位選「檢查項目」或其他分類欄位。")
 
-        st.markdown("##### 標題與座標名稱")
-        label_cols = st.columns(3)
-        chart_title = label_cols[0].text_input("圖表標題", value=setting_value("chart_title", ""))
-        x_axis_label = label_cols[1].text_input("X 軸名稱", value=setting_value("x_axis_label", x_col))
-        y_axis_label = label_cols[2].text_input("Y 軸名稱", value=setting_value("y_axis_label", y_mode))
+        with st.container(border=True):
+            st.markdown("##### 圖表文字")
+            label_cols = st.columns(3)
+            chart_title = label_cols[0].text_input("圖表標題", value=setting_value("chart_title", ""))
+            x_axis_label = label_cols[1].text_input("X 軸名稱", value=setting_value("x_axis_label", x_col))
+            y_axis_label = label_cols[2].text_input("Y 軸名稱", value=setting_value("y_axis_label", y_mode))
 
-        pie_label_modes = ["標籤+百分比", "標籤+數值", "百分比", "數值", "全部"]
-        pie_label_mode = "標籤+百分比"
-        if chart_type == "圓餅圖":
-            pie_label_mode = st.selectbox("圓餅圖標籤呈現方式", pie_label_modes, index=valid_index("pie_label_mode_index", pie_label_modes))
+            pie_label_modes = ["標籤+百分比", "標籤+數值", "百分比", "數值", "全部"]
+            pie_label_mode = "標籤+百分比"
+            if chart_type == "圓餅圖":
+                pie_label_mode = st.radio("圓餅圖標籤呈現方式", pie_label_modes, horizontal=True, index=valid_index("pie_label_mode_index", pie_label_modes))
 
         y_range_enabled = False
         y_min = None
         y_max = None
         if chart_type != "圓餅圖":
-            st.markdown("##### Y 軸範圍")
-            axis_cols = st.columns([1, 1, 1, 1])
-            y_range_enabled = axis_cols[0].checkbox("自訂 Y 軸範圍", value=setting_value("y_range_enabled", False))
-            y_min = axis_cols[1].number_input("Y 軸最小值", value=float(setting_value("y_min", 0.0)), disabled=not y_range_enabled)
-            y_max = axis_cols[2].number_input("Y 軸最大值", value=float(setting_value("y_max", 850.0)), disabled=not y_range_enabled)
-            y_tick_interval = axis_cols[3].number_input(
-                "Y 軸間距",
-                min_value=0.0,
-                value=float(setting_value("y_tick_interval", 0.0)),
-                step=0.1,
-                help="例如 1~7 每格 0.5，就輸入 0.5。填 0 代表自動。",
-            )
+            with st.container(border=True):
+                st.markdown("##### Y 軸與資料標籤")
+                axis_cols = st.columns([1, 1, 1, 1])
+                y_range_enabled = axis_cols[0].checkbox("自訂 Y 軸範圍", value=setting_value("y_range_enabled", False))
+                y_min = axis_cols[1].number_input("Y 軸最小值", value=float(setting_value("y_min", 0.0)), disabled=not y_range_enabled)
+                y_max = axis_cols[2].number_input("Y 軸最大值", value=float(setting_value("y_max", 850.0)), disabled=not y_range_enabled)
+                y_tick_interval = axis_cols[3].number_input(
+                    "Y 軸間距",
+                    min_value=0.0,
+                    value=float(setting_value("y_tick_interval", 0.0)),
+                    step=0.1,
+                    help="例如 1~7 每格 0.5，就輸入 0.5。填 0 代表自動。",
+                )
         else:
             y_tick_interval = None
 
         show_data_labels = st.checkbox("顯示資料標籤", value=setting_value("show_data_labels", False))
 
-        st.markdown("##### 顏色")
         traffic_color_enabled = False
         green_color = setting_value("green_color", "#10B981")
         yellow_color = setting_value("yellow_color", "#F59E0B")
         red_color = setting_value("red_color", "#EF4444")
-        if chart_type == "長條圖":
-            color_cols = st.columns(5)
-            traffic_color_enabled = color_cols[0].checkbox(
-                "依紅黃綠燈上色",
-                value=setting_value("traffic_color_enabled", False),
-                disabled=range_mode != "紅黃綠燈" or "判定" not in chart_source.columns,
-            )
-            bar_color = color_cols[1].color_picker("一般柱體顏色", value=setting_value("bar_color", "#2563EB"))
-            green_color = color_cols[2].color_picker("綠燈顏色", value=green_color)
-            yellow_color = color_cols[3].color_picker("黃燈顏色", value=yellow_color)
-            red_color = color_cols[4].color_picker("紅燈顏色", value=red_color)
-        else:
-            bar_color = setting_value("bar_color", "#2563EB")
-            st.caption("長條圖可設定柱體顏色；其他圖表使用預設配色。")
+        with st.container(border=True):
+            st.markdown("##### 顏色與圖例")
+            st.caption("有選系列欄位或啟用燈號上色時，圖表會顯示圖例。")
+            if chart_type == "長條圖":
+                color_cols = st.columns(5)
+                traffic_color_enabled = color_cols[0].checkbox(
+                    "依紅黃綠燈上色",
+                    value=setting_value("traffic_color_enabled", False),
+                    disabled=range_mode != "紅黃綠燈" or "判定" not in chart_source.columns,
+                )
+                bar_color = color_cols[1].color_picker("一般柱體顏色", value=setting_value("bar_color", "#2563EB"))
+                green_color = color_cols[2].color_picker("綠燈顏色", value=green_color)
+                yellow_color = color_cols[3].color_picker("黃燈顏色", value=yellow_color)
+                red_color = color_cols[4].color_picker("紅燈顏色", value=red_color)
+            else:
+                bar_color = setting_value("bar_color", "#2563EB")
+                st.caption("長條圖可設定柱體顏色；折線圖可在系列顏色設定各線條顏色。")
         traffic_colors = {
             "綠燈": green_color,
             "黃燈": yellow_color,
@@ -892,16 +1032,19 @@ with tab_chart:
         }
         series_colors = {}
         if series_col:
-            st.markdown("##### 系列顏色")
-            series_values = [value for value in chart_source[series_col].dropna().astype(str).unique().tolist() if value]
-            default_palette = ["#2563EB", "#EF4444", "#10B981", "#F59E0B", "#8B5CF6", "#06B6D4", "#64748B", "#EC4899"]
-            color_columns = st.columns(min(4, max(1, len(series_values))))
-            for idx, series_value in enumerate(series_values):
-                key = f"series_color_{series_col}_{series_value}"
-                series_colors[series_value] = color_columns[idx % len(color_columns)].color_picker(
-                    series_value,
-                    value=setting_value(key, default_palette[idx % len(default_palette)]),
-                )
+            with st.container(border=True):
+                st.markdown("##### 系列顏色")
+                series_values = [value for value in chart_source[series_col].dropna().astype(str).unique().tolist() if value]
+                default_palette = ["#2563EB", "#EF4444", "#10B981", "#F59E0B", "#8B5CF6", "#06B6D4", "#64748B", "#EC4899"]
+                color_columns = st.columns(min(4, max(1, len(series_values))))
+                for idx, series_value in enumerate(series_values):
+                    key = f"series_color_{series_col}_{series_value}"
+                    series_colors[series_value] = color_columns[idx % len(color_columns)].color_picker(
+                        series_value,
+                        value=setting_value(key, default_palette[idx % len(default_palette)]),
+                    )
+
+        limit_lines = build_limit_lines(range_mode, lower_value, upper_value, traffic_ranges)
 
         fig = make_chart(
             chart_source,
@@ -923,13 +1066,14 @@ with tab_chart:
             series_colors,
             show_data_labels,
             y_tick_interval if y_tick_interval and y_tick_interval > 0 else None,
+            limit_lines,
         )
         if fig is None:
             st.info("目前篩選結果沒有可繪圖的資料。")
         else:
             st.plotly_chart(fig, use_container_width=True)
             st.markdown("##### 匯出圖表")
-            export_cols = st.columns(2)
+            export_cols = st.columns(3)
             chart_html = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
             export_cols[0].download_button(
                 "匯出圖表 HTML",
@@ -947,42 +1091,25 @@ with tab_chart:
                     mime="image/png",
                     use_container_width=True,
                 )
+                chart_svg = fig.to_image(format="svg")
+                export_cols[2].download_button(
+                    "匯出圖表 SVG",
+                    data=chart_svg,
+                    file_name=f"圖表_{datetime.now().strftime('%Y%m%d_%H%M')}.svg",
+                    mime="image/svg+xml",
+                    use_container_width=True,
+                )
             except Exception:
                 pass
-
-        if st.button("保留圖表設定", use_container_width=True):
-            chart_settings = {
-                "chart_data_mode_index": ["統計結果", "篩選明細"].index(chart_data_mode),
-                "chart_type_index": chart_types.index(chart_type),
-                "x_col_index": chart_cols.index(x_col),
-                "y_mode_index": y_modes.index(y_mode),
-                "series_col_index": series_options.index(series_col),
-                "bar_color": bar_color,
-                "y_range_enabled": y_range_enabled,
-                "y_min": y_min,
-                "y_max": y_max,
-                "y_tick_interval": y_tick_interval or 0.0,
-                "show_data_labels": show_data_labels,
-                "chart_title": chart_title,
-                "x_axis_label": x_axis_label,
-                "y_axis_label": y_axis_label,
-                "pie_label_mode_index": pie_label_modes.index(pie_label_mode),
-                "traffic_color_enabled": traffic_color_enabled,
-                "green_color": green_color,
-                "yellow_color": yellow_color,
-                "red_color": red_color,
-            }
-            for series_value, color in series_colors.items():
-                chart_settings[f"series_color_{series_col}_{series_value}"] = color
-            update_saved_settings(**chart_settings)
-            st.success("已保留圖表設定。")
 
 export_name = f"行動檢修平台整理_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 export_display = compact_repeated_values(
     filtered[display_cols],
     ["來源檔案", "工單編號", "車號/最小成本", "檢查結束日期"],
 ).rename(columns={"檢查結果數值": "檢查結果"})
-export_bytes = to_excel_bytes({"篩選結果": export_display, "統計": stats_df})
+export_display = format_numeric_columns(export_display)
+export_stats = format_numeric_columns(stats_df)
+export_bytes = to_excel_bytes({"篩選結果": export_display, "統計": export_stats})
 st.download_button(
     "匯出目前篩選結果",
     data=export_bytes,
